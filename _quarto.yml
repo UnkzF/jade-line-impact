@@ -1,0 +1,16 @@
+project:
+  type: default
+  output-dir: outputs
+
+format:
+  html:
+    theme: flatly
+    toc: true
+    code-fold: true
+    embed-resources: true
+
+execute:
+  cache: true
+  warning: false
+  message: false
+  fig-showtext: true

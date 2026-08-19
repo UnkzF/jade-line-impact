@@ -1,0 +1,11 @@
+# Ignore data and environment files
+/data/*
+!/data/.keep
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Quarto and Renv
+/.quarto/
+/renv/library/

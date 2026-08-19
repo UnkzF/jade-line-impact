@@ -1,0 +1,262 @@
+---
+title: "03 - Diagnostics and Visualizations"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: setup-fonts
+#| message: false
+
+library(showtext)
+
+# Map the two existing files. 
+font_add(
+  family = "NHG", 
+  regular = "C:/WINDOWS/FONTS/NHAASGROTESKTXPRO-RG.TTF",
+  italic  = "C:/WINDOWS/FONTS/NHAASGROTESKTXPRO-IT.TTF"
+)
+
+# Tell R to automatically use showtext for rendering graphics
+showtext_auto()
+
+```
+
+```{r}
+#| label: load-artifacts
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(cobalt)
+library(ggplot2)
+library(here)
+
+experiments <- readRDS(here("data", "processed", "02_experiments_results.rds"))
+master_table <- readRDS(here("data", "processed", "02_master_sample_table.rds"))
+```
+
+## Master Sample Table & Causal Estimates
+```{r}
+#| label: tbl-master
+
+knitr::kable(master_table, caption = "Sample Size & DiD Estimates per Stratum")
+```
+
+## Common Support (PCA) and Balance (Love Plots)
+```{r}
+#| label: diagnostic-functions
+
+gerar_pca <- function(matched_data, strata_name, 
+                      font_family = "sans", 
+                      color_ctrl = "#999999", 
+                      color_trt = "#E69F00") {
+  
+  covariates <- matched_data %>%
+    select(sexo_harm, educ_harm, activity_harm, has_car, age_group, RENDA_SM) %>%
+    mutate(across(where(is.character), as.factor), across(where(is.factor), as.numeric)) %>%
+    select(where(~ var(.x, na.rm = TRUE) > 0))
+  
+  pca_res <- prcomp(covariates, scale. = TRUE)
+  plot_data_pca <- matched_data %>%
+    mutate(PC1 = pca_res$x[, 1], PC2 = pca_res$x[, 2],
+           Status = ifelse(Treated == 1, "Treated", "Control (Counterfactual)"))
+  
+  ggplot(plot_data_pca, aes(x = PC1, y = PC2, color = Status, fill = Status)) +
+    stat_density_2d(aes(alpha = after_stat(level)), geom = "polygon", bins = 5) +
+    geom_point(alpha = 0.4, size = 1) +
+    scale_color_manual(values = c("Control (Counterfactual)" = color_ctrl, "Treated" = color_trt)) +
+    scale_fill_manual(values = c("Control (Counterfactual)" = color_ctrl, "Treated" = color_trt)) +
+    labs(title = paste("PCA Overlap -", strata_name)) + 
+    theme_minimal(base_family = font_family) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(face = "bold", size = 12),
+      axis.text = element_text(size = 10)
+    )
+}
+
+gerar_plots_tendencia <- function(strata_data, strata_name,
+                                  font_family = "sans",
+                                  color_ctrl_full = "#a39a92",
+                                  color_trt_full = "#77685d",
+                                  color_ctrl_strata = "#483d3f",
+                                  color_trt_strata = "#058ed9",
+                                  linetype_full = "dashed",  # Line type for the Global Baseline
+                                  linetype_strata = "solid", # Line type for the specific Strata
+                                  y_breaks_ext = waiver(),
+                                  y_breaks_int = waiver(),
+                                  x_breaks = c(1997, 2007, 2017, 2023)) {
+  
+  full_trend <- experiments$Full$matched_data %>%
+    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0)) %>%
+    group_by(Year, Treated) %>%
+    summarise(
+      Extensive = weighted.mean(Y_Binary, w = FE_PESS, na.rm = TRUE),
+      Intensive = weighted.mean(TOT_VIAG, w = FE_PESS, na.rm = TRUE), .groups = "drop"
+    ) %>%
+    mutate(Grupo = ifelse(Treated == 1, "Treated (Full)", "Control (Full)"), Contexto = "Baseline Global")
+  
+  strata_trend <- strata_data %>%
+    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0)) %>%
+    group_by(Year, Treated) %>%
+    summarise(
+      Extensive = weighted.mean(Y_Binary, w = FE_PESS, na.rm = TRUE),
+      Intensive = weighted.mean(TOT_VIAG, w = FE_PESS, na.rm = TRUE), .groups = "drop"
+    ) %>%
+    mutate(Grupo = ifelse(Treated == 1, paste("Treated", strata_name), paste("Control", strata_name)), Contexto = strata_name)
+  
+  plot_data <- bind_rows(full_trend, strata_trend)
+  cores <- setNames(c(color_ctrl_full, color_trt_full, color_ctrl_strata, color_trt_strata),
+                    c("Control (Full)", "Treated (Full)", paste("Control", strata_name), paste("Treated", strata_name)))
+  
+  # Injecting the new parameters here:
+  linhas <- setNames(c(linetype_full, linetype_strata), c("Baseline Global", strata_name))
+  
+  # Centralized aesthetic logic for both plots
+  custom_theme <- theme_minimal(base_family = font_family) + 
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(face = "bold", size = 12),
+      axis.text = element_text(size = 10),
+      legend.title = element_blank() 
+    )
+  
+  p_ext <- ggplot(plot_data, aes(x = Year, y = Extensive, color = Grupo, linetype = Contexto)) +
+    geom_vline(xintercept = 2018, linetype = "dotted", color = "gray50", linewidth = 1) +
+    geom_line(linewidth = 0.8) + geom_point(size = 3) +
+    scale_color_manual(values = cores) + scale_linetype_manual(values = linhas) +
+    scale_x_continuous(breaks = x_breaks) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = y_breaks_ext) +
+    labs(title = paste("Extensive Margin:", strata_name), y = "How Likely To Make a Trip", x = "Year") +
+    custom_theme
+    
+  p_int <- ggplot(plot_data, aes(x = Year, y = Intensive, color = Grupo, linetype = Contexto)) +
+    geom_vline(xintercept = 2018, linetype = "dotted", color = "gray50", linewidth = 1) +
+    geom_line(linewidth = 0.8) + geom_point(size = 3) +
+    scale_color_manual(values = cores) + scale_linetype_manual(values = linhas) +
+    scale_x_continuous(breaks = x_breaks) +
+    scale_y_continuous(breaks = y_breaks_int) +
+    labs(title = paste("Intensive Margin:", strata_name), y = "Average Number of Trips (N)", x = "Year") +
+    custom_theme
+    
+  list(ext = p_ext, int = p_int)
+}
+
+```
+
+::: {.panel-tabset}
+
+## S1: Baixa Renda (0-0.77 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S1$matched_data, "S1")
+love.plot(experiments$S1$match_obj, binary = "std", continuous = "std", abs = TRUE, thresholds = c(m = .1), title = "SMD - S1") + theme_minimal()
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s1 <- gerar_plots_tendencia(experiments$S1$matched_data, "S1")
+t_s1$ext
+t_s1$int
+
+```
+
+## S2: Renda Média-Baixa (0.77-2.01 SM)
+
+```{r}
+#|  layout-ncol: 2
+
+gerar_pca(experiments$S2$matched_data, "S2")
+love.plot(experiments$S2$match_obj, binary = "std", continuous = "std", abs = TRUE, thresholds = c(m = .1), title = "SMD - S2") + theme_minimal()
+
+```
+
+```{r}
+#| layout-ncol: 2
+#| 
+t_s2 <- gerar_plots_tendencia(experiments$S2$matched_data, "S2")
+t_s2$ext
+t_s2$int
+
+```
+
+## S3: Média/Alta Renda (> 2.01 SM)
+
+```{r}
+#| layout-ncol: 2
+#| 
+gerar_pca(experiments$S3$matched_data, "S3")
+love.plot(experiments$S3$match_obj, binary = "std", continuous = "std", abs = TRUE, thresholds = c(m = .1), title = "SMD - S3") + theme_minimal()
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s3 <- gerar_plots_tendencia(experiments$S3$matched_data, "S3")
+t_s3$ext
+t_s3$int
+
+```
+
+```{r}
+
+#| label: export-artefacts
+#| message: false
+#| warning: false
+
+# 1. Define the strata to iterate over
+strata_keys <- c("S1", "S2", "S3")
+
+# 2. Loop through and export all plots
+for (s in strata_keys) {
+  
+  # A. Export PCA Plot (Applying the font here)
+  p_pca <- gerar_pca(
+    matched_data = experiments[[s]]$matched_data, 
+    strata_name = s,
+    font_family = "Neue Haas Grotesk"
+  )
+  ggsave(here("outputs", "figures", paste0("pca_overlap_", s, ".png")), 
+         plot = p_pca, width = 8, height = 6, dpi = 300, bg = "white")
+  
+  # B. Export Love Plot 
+  # (Love plots from cobalt use a slightly different theme syntax, so we apply it directly)
+  p_love <- love.plot(experiments[[s]]$match_obj, binary = "std", continuous = "std", 
+                      abs = TRUE, thresholds = c(m = .1), 
+                      title = paste("Balanço SMD -", s)) + 
+    theme_minimal(base_family = "Neue Haas Grotesk") +
+    theme(plot.title = element_text(face = "bold"))
+  
+  ggsave(here("outputs", "figures", paste0("love_plot_", s, ".png")), 
+         plot = p_love, width = 8, height = 6, dpi = 300, bg = "white")
+  
+  # C. Export Trend Plots (Applying the font to both Ext and Int plots at once)
+  p_trends <- gerar_plots_tendencia(
+    strata_data = experiments[[s]]$matched_data, 
+    strata_name = s,
+    font_family = "Neue Haas Grotesk"
+  )
+  
+  ggsave(here("outputs", "figures", paste0("trend_extensive_", s, ".png")), 
+         plot = p_trends$ext, width = 8, height = 5, dpi = 300, bg = "white")
+  
+  ggsave(here("outputs", "figures", paste0("trend_intensive_", s, ".png")), 
+         plot = p_trends$int, width = 8, height = 5, dpi = 300, bg = "white")
+}
+
+# 4. Export the Master Table
+write_csv(master_table, here("outputs", "tables", "master_sample_table.csv"))
+
+message("(EN) All Plots and Data were exported to 'outputs/' folder!")
+message("(PT) Todos os gráficos e tabelas foram exportados com sucesso para a pasta 'outputs/'!")
+
+
+```
+

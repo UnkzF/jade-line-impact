@@ -1,0 +1,93 @@
+---
+title: "02 - Matching, DiD and Triple Difference"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: matching-and-models
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(MatchIt)
+library(broom)
+library(lmtest)
+library(sandwich)
+library(purrr)
+
+panel_base <- readRDS(here("data", "processed", "01_panel_base_clean.rds"))
+
+run_strata_experiment <- function(min_sm, max_sm, strata_name, data) {
+  
+  df_filtered <- data %>% filter(RENDA_SM >= min_sm & RENDA_SM < max_sm)
+  
+  match_obj <- matchit(
+    formula = Treated ~ sexo_harm + educ_harm + activity_harm + has_car + age_group + RENDA_SM,
+    data = df_filtered, method = "nearest", distance = "mahalanobis",
+    exact = ~ Year, ratio = 3, replace = FALSE 
+  )
+  
+  matched_data <- match.data(match_obj) %>% mutate(Strata = strata_name)
+  
+  did_df <- matched_data %>%
+    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0), Year_Factor = relevel(factor(Year), ref = "2017"))
+  
+  # Extensive Margin
+  model_ext <- lm(Y_Binary ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group, 
+                  data = did_df, weights = FE_PESS)
+  res_ext <- tidy(coeftest(model_ext, vcov = vcovCL(model_ext, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+  
+  # Intensive Margin
+  model_int <- lm(TOT_VIAG ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group, 
+                  data = did_df, weights = FE_PESS)
+  res_int <- tidy(coeftest(model_int, vcov = vcovCL(model_int, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+  
+  n_pre <- df_filtered %>% group_by(Year, Treated) %>% summarise(N_Pre = n(), .groups = "drop")
+  n_post <- matched_data %>% group_by(Year, Treated) %>% summarise(N_Post = n(), .groups = "drop")
+  
+  sample_table <- n_pre %>%
+    left_join(n_post, by = c("Year", "Treated")) %>%
+    mutate(Grupo = ifelse(Treated == 1, "Tratado", "Controle")) %>% select(-Treated) %>%
+    pivot_wider(names_from = Grupo, values_from = c(N_Pre, N_Post), values_fill = 0) %>%
+    mutate(
+      Strata = strata_name,
+      DiD_Ext_Estimate = round(res_ext$estimate, 4), DiD_Ext_PValue = round(res_ext$p.value, 4),
+      DiD_Int_Estimate = round(res_int$estimate, 4), DiD_Int_PValue = round(res_int$p.value, 4)
+    ) %>%
+    select(Strata, Year, N_Pre_Controle, N_Pre_Tratado, N_Post_Controle, N_Post_Tratado, 
+           DiD_Ext_Estimate, DiD_Ext_PValue, DiD_Int_Estimate, DiD_Int_PValue)
+
+  return(list(sample_table = sample_table, matched_data = matched_data, match_obj = match_obj))
+}
+
+# Scenarios based on CART optimal breaks (merged S3/S4)
+strata_defs <- list(
+  list(0, Inf, "Full Panel (Global)"),
+  list(0, 0.77, "S1: 0 a 0.77 SM"),
+  list(0.77, 2.01, "S2: 0.77 a 2.01 SM"),
+  list(2.01, Inf, "S3: > 2.01 SM")
+)
+
+experiments <- map(strata_defs, ~run_strata_experiment(.x[[1]], .x[[2]], .x[[3]], panel_base))
+names(experiments) <- c("Full", "S1", "S2", "S3")
+
+master_sample_table <- map_dfr(experiments, "sample_table")
+master_matched_data <- map_dfr(experiments[-1], "matched_data")
+
+# Triple Difference (DDD) - Intensive Margin
+master_matched_data$Year_Factor <- relevel(factor(master_matched_data$Year), ref = "2017")
+mod_ddd_int <- lm(
+  TOT_VIAG ~ Treated * Year_Factor * factor(Strata) + 
+    sexo_harm + educ_harm + activity_harm + has_car + age_group, 
+  data = master_matched_data, weights = FE_PESS
+)
+res_ddd_int <- coeftest(mod_ddd_int, vcov = vcovCL(mod_ddd_int, cluster = ~ZONA_07))
+
+# --- EXPORT ARTIFACTS ---
+saveRDS(master_sample_table, here("data", "processed", "02_master_sample_table.rds"))
+saveRDS(master_matched_data, here("data", "processed", "02_master_matched_data.rds"))
+saveRDS(experiments, here("data", "processed", "02_experiments_results.rds"))
+saveRDS(res_ddd_int, here("data", "processed", "02_triple_diff_results.rds"))
+
+```
