@@ -35,7 +35,7 @@ The workflow is completely modular and orchestrated via Quarto (`.qmd`) document
 
 *Note: Due to file size constraints and data sharing protocols, the raw OD survey microdata and geospatial shapefiles in the data/ directory are not tracked in this repository.*
 
-##⚙️ Reproducibility
+## ⚙️ Reproducibility
 
 This project utilizes renv to guarantee 100% computational reproducibility. To replicate the environment on your local machine:
 
