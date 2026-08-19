@@ -1,6 +1,6 @@
 # Impactos do Metrô de São Paulo no Padrão de Viagens: Estudo de Caso na Linha 13 - Jade
 
-This repository contains the analytical pipeline and codebase for a Master's dissertation evaluating the causal transportation impacts of the São Paulo Metro Line 13 - Jade.
+This repository contains the analytical pipeline and codebase for evaluating the causal transportation impacts of the São Paulo Metro Line 13 - Jade.
 
 The study leverages decades of Origin-Destination (OD) survey data (1997, 2007, 2017, and 2023) to assess shifts in urban mobility patterns, analyzing both the **extensive margin** (probability of making a trip) and the **intensive margin** (total volume of trips) for residents within the transit catchment area.
 
