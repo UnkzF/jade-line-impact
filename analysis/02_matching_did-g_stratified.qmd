@@ -1,0 +1,162 @@
+---
+title: "02 - Matching, DiD and Triple Difference"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: matching-and-models
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(MatchIt)
+library(broom)
+library(lmtest)
+library(sandwich)
+library(purrr)
+library(here)
+
+panel_base <- readRDS(here("data", "processed", "01_panel_base_6s.rds"))
+
+run_strata_experiment <- function(min_sm, max_sm, target_gender, strata_name, data) {
+  
+  df_filtered <- data %>% filter(RENDA_SM >= min_sm & RENDA_SM < max_sm)
+  
+  # Dynamic Formulas based on Gender Stratification
+  if (target_gender != "All") {
+    # For the 6 slices: Pre-filter the data. exact = ~Year is enough.
+    df_filtered <- df_filtered %>% filter(sexo_harm == target_gender)
+    
+    form_match <- Treated ~ educ_harm + activity_harm + has_car + age_group + RENDA_SM
+    form_exact <- ~ Year
+    
+    # Regression formulas without sexo_harm
+    form_did_ext <- Y_Binary ~ Treated * Year_Factor + educ_harm + activity_harm + has_car + age_group
+    form_did_int <- TOT_VIAG ~ Treated * Year_Factor + educ_harm + activity_harm + has_car + age_group
+    
+  } else {
+    # For the Global Baseline: Force exact matching on both Year AND Gender
+    form_match <- Treated ~ educ_harm + activity_harm + has_car + age_group + RENDA_SM
+    form_exact <- ~ Year + sexo_harm
+    
+    # Regression formulas with sexo_harm
+    form_did_ext <- Y_Binary ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group
+    form_did_int <- TOT_VIAG ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group
+  }
+  
+  match_obj <- matchit(
+    formula = form_match,
+    data = df_filtered, method = "nearest", distance = "mahalanobis",
+    exact = form_exact, 
+    ratio = 3, replace = FALSE 
+  )
+  
+  matched_data <- match.data(match_obj) %>% mutate(Strata = strata_name)
+  
+  did_df <- matched_data %>%
+    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0), Year_Factor = relevel(factor(Year), ref = "2017"))
+  
+  # Extensive Margin
+  model_ext <- lm(form_did_ext, data = did_df, weights = FE_PESS)
+  res_ext <- tidy(coeftest(model_ext, vcov = vcovCL(model_ext, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+  
+  # Intensive Margin
+  model_int <- lm(form_did_int, data = did_df, weights = FE_PESS)
+  res_int <- tidy(coeftest(model_int, vcov = vcovCL(model_int, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+  
+  n_pre <- df_filtered %>% group_by(Year, Treated) %>% summarise(N_Pre = n(), .groups = "drop")
+  n_post <- matched_data %>% group_by(Year, Treated) %>% summarise(N_Post = n(), .groups = "drop")
+  
+  sample_table <- n_pre %>%
+    left_join(n_post, by = c("Year", "Treated")) %>%
+    mutate(Grupo = ifelse(Treated == 1, "Tratado", "Controle")) %>% select(-Treated) %>%
+    pivot_wider(names_from = Grupo, values_from = c(N_Pre, N_Post), values_fill = 0) %>%
+    mutate(
+      Strata = strata_name,
+      DiD_Ext_Estimate = round(res_ext$estimate, 4), DiD_Ext_PValue = round(res_ext$p.value, 4),
+      DiD_Int_Estimate = round(res_int$estimate, 4), DiD_Int_PValue = round(res_int$p.value, 4)
+    ) %>%
+    select(Strata, Year, N_Pre_Controle, N_Pre_Tratado, N_Post_Controle, N_Post_Tratado, 
+           DiD_Ext_Estimate, DiD_Ext_PValue, DiD_Int_Estimate, DiD_Int_PValue)
+
+  return(list(sample_table = sample_table, matched_data = matched_data, match_obj = match_obj))
+}
+
+# The 6 New Strata Definitions (plus the global baseline)
+strata_defs <- list(
+  list(0, Inf, "All", "Full Panel (Global)"),
+  list(0, 0.77, "Male", "S1_Male"),
+  list(0, 0.77, "Female", "S1_Female"),
+  list(0.77, 2.01, "Male", "S2_Male"),
+  list(0.77, 2.01, "Female", "S2_Female"),
+  list(2.01, Inf, "Male", "S3_Male"),
+  list(2.01, Inf, "Female", "S3_Female")
+)
+
+experiments <- map(strata_defs, ~run_strata_experiment(.x[[1]], .x[[2]], .x[[3]], .x[[4]], panel_base))
+names(experiments) <- c("Full", "S1_Male", "S1_Female", "S2_Male", "S2_Female", "S3_Male", "S3_Female")
+
+master_sample_table <- map_dfr(experiments, "sample_table")
+master_matched_data <- map_dfr(experiments[-1], "matched_data")
+
+# Triple Difference (DDD) - Intensive Margin
+master_matched_data$Year_Factor <- relevel(factor(master_matched_data$Year), ref = "2017")
+mod_ddd_int <- lm(
+  TOT_VIAG ~ Treated * Year_Factor * factor(Strata) + 
+    sexo_harm + educ_harm + activity_harm + has_car + age_group, 
+  data = master_matched_data, weights = FE_PESS
+)
+res_ddd_int <- coeftest(mod_ddd_int, vcov = vcovCL(mod_ddd_int, cluster = ~ZONA_07))
+
+# --- EXPORT ARTIFACTS ---
+saveRDS(master_sample_table, here("data", "processed", "02_master_sample_table-6s.rds"))
+saveRDS(master_matched_data, here("data", "processed", "02_master_matched_data-6s.rds"))
+saveRDS(experiments, here("data", "processed", "02_experiments_results-6s.rds"))
+saveRDS(res_ddd_int, here("data", "processed", "02_triple_diff_results-6s.rds"))
+```
+
+
+```{r contraexperimento-did}
+#| label: contraexperimento did
+#| cache: true
+#| eval: false
+
+panel_base <- readRDS(here("data", "processed", "01_panel_base_clean.rds"))
+
+
+# 1. Prepare the CS-DiD variables
+did_df_cs <- panel_base %>%
+  mutate(
+    ID_PESS = as.numeric(ID_PESS),
+    Y_Binary = ifelse(TOT_VIAG > 0, 1, 0),
+    # Create the Group variable: 2018 for treated zones, 0 for control zones
+    first_treat_year = ifelse(Treated == 1, 2018, 0),
+  )
+
+# 2. Run the CS-DiD Estimator
+did_contra <- att_gt(
+  yname = "TOT_VIAG", # Swap to "TOT_VIAG" to test the Intensive Margin
+  tname =  "Year",
+  #idname = "ID_PESS", 
+  gname = "first_treat_year", 
+  xformla = ~ 1,
+  data = did_df_cs,
+  panel = FALSE, # CRITICAL: Tells the package this is a repeated cross-section
+  allow_unbalanced_panel = TRUE, 
+  weightsname = "FE_PESS",
+  control_group = "nevertreated", # Explicitly defines the 0 group as the control
+  bstrap = TRUE, # Enables wild bootstrap for robust standard errors
+  cband = TRUE   # Computes simultaneous confidence bands
+)
+
+# 3. View the baseline Group-Time Average Treatment Effects
+summary(did_contra)
+
+# 4. Aggregate into an Event Study (Dynamic Effects)
+es_contra <- aggte(did_contra, type = "dynamic")
+summary(es_contra)
+ggdid(did_contra)
+ggdid(es_contra)
+
+```

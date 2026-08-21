@@ -1,0 +1,211 @@
+---
+title: "01 - Setup, Harmonization and CART Stratification - gender strata"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: setup-and-harmonization
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(sf)
+library(tmap)
+library(data.table)
+library(rpart)
+library(rpart.plot)
+library(here)
+library(showtext)
+
+# Load custom helper functions
+source(here("R", "spatial_helpers.R"))
+
+# --- 1. FILE PATHS ---
+# Shapes
+od07fps <- here("data", "raw", "od2007", "Zonas2007_region.shp")
+od97fps <- here("data", "raw", "od1997", "Zonas1997_region.shp")
+od17fps <- here("data", "raw", "od2017", "Zonas_2017_region.shp")
+od23fps <- here("data", "raw", "od2023", "Zonas_2023.shp")
+
+# Data Tables
+od07fp <- here("data", "raw", "od2007", "OD_2007_v2d.dbf")
+od97fp <- here("data", "raw", "od1997", "OD97Zona.dbf")
+od17fp <- here("data", "raw", "od2017", "OD_2017_v1.dbf")
+od23fp <- here("data", "raw", "od2023", "Banco2023_divulgacao_190225.dbf")
+
+# Treatment Shape
+ljade <- here("data", "raw", "outros", "SIRGAS_GPKG_linhatrem.gpkg")
+
+# --- 2. READ SPATIAL & TABULAR DATA ---
+od07z <- st_read(od07fps, quiet = TRUE) %>% st_transform(31983)
+od97z <- st_read(od97fps, quiet = TRUE) %>% st_transform(31983)
+od17z <- st_read(od17fps, quiet = TRUE) %>% st_transform(31983)
+od23z <- st_read(od23fps, quiet = TRUE) %>% st_transform(31983)
+
+od07 <- st_read(od07fp, geometry = FALSE, quiet = TRUE)
+od97 <- st_read(od97fp, geometry = FALSE, quiet = TRUE)
+od17 <- st_read(od17fp, geometry = FALSE, quiet = TRUE)
+od23 <- st_read(od23fp, geometry = FALSE, quiet = TRUE)
+
+linha_jade <- st_read(ljade, query = "SELECT * FROM \"SIRGAS_GPKG_linhatrem\" WHERE ltr_nome = 'JADE'", quiet = TRUE) %>%
+  st_transform(31983)
+
+# Treatment definition
+is_treated <- lengths(st_intersects(od07z, linha_jade)) > 0
+treatment_table <- data.frame(ZONA = od07z$Zona07, Treated = as.numeric(is_treated))
+valid_zones_07 <- treatment_table$ZONA
+
+# --- 3. HARMONIZATION & PANEL STACKING ---
+SM_2023 <- 1550.00
+SM_2017 <- 1094.00
+SM_2007 <- 490.00
+SM_1997 <- 120.00
+
+clean_currency <- function(x) {
+  if(is.numeric(x)) return(x)
+  as.numeric(str_replace(as.character(x), ",", "."))
+}
+
+get_target_zones <- function(key_df, valid_list, col_orig, col_dest) {
+  key_df %>%
+    filter(!!sym(col_dest) %in% valid_list) %>%
+    group_by(!!sym(col_orig)) %>%
+    filter(weight == max(weight)) %>% slice(1) %>% ungroup() %>%
+    select(!!sym(col_orig), !!sym(col_dest))
+}
+
+key_23_07 <- generate_weights(od23z, od07z, "NumeroZona", "Zona07", 2023, 2007)
+key_17_07 <- generate_weights(od17z, od07z, "NumeroZona", "Zona07", 2017, 2007)
+key_97_07 <- generate_weights(od97z, od07z, "Zona97", "Zona07", 1997, 2007)
+
+map_23 <- get_target_zones(key_23_07, valid_zones_07, "Z_2023", "Z_2007")
+map_17 <- get_target_zones(key_17_07, valid_zones_07, "Z_2017", "Z_2007")
+map_97 <- get_target_zones(key_97_07, valid_zones_07, "Z_1997", "Z_2007")
+
+p23 <- od23 %>% 
+  filter(ZONA %in% map_23$Z_2023, F_PESS == 1) %>%
+  left_join(map_23, by = c("ZONA" = "Z_2023")) %>%
+  mutate(Year = 2023, 
+         ZONA_07 = Z_2007, 
+         RENDA_SM = clean_currency(VL_REN_I) / SM_2023,
+         FE_PESS = clean_currency(FE_PESS),
+         TOT_VIAG = clean_currency(TOT_VIAG),
+         QT_AUTO = as.numeric(QT_AUTO),
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG, 
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+p17 <- od17 %>%
+  filter(ZONA %in% map_17$Z_2017, F_PESS == 1) %>%
+  left_join(map_17, by = c("ZONA" = "Z_2017")) %>%
+  mutate(Year = 2017,
+         ZONA_07 = Z_2007,
+         RENDA_SM = clean_currency(VL_REN_I) / SM_2017,
+         FE_PESS = clean_currency(FE_PESS),
+         TOT_VIAG = clean_currency(TOT_VIAG),
+         QT_AUTO = as.numeric(QT_AUTO),
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG,
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+p07 <- od07 %>% 
+  filter(ZONA %in% valid_zones_07, F_PESS == 1) %>%
+  mutate(Year = 2007, 
+         ZONA_07 = ZONA, 
+         RENDA_SM = clean_currency(VL_REN_I) / SM_2007,
+         FE_PESS = clean_currency(FE_PESS), 
+         TOT_VIAG = clean_currency(TOT_VIAG),
+         QT_AUTO = as.numeric(QT_AUTO), 
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG, 
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+p97 <- od97 %>% 
+  filter(ZONA %in% map_97$Z_1997) %>%
+  group_by(ID_PESS) %>% 
+  mutate(TOT_VIAG = sum(!is.na(clean_currency(FE_VIA)) & clean_currency(FE_VIA) > 0)) %>% 
+  ungroup() %>%
+  filter(F_PESS == 1) %>% 
+  left_join(map_97, by = c("ZONA" = "Z_1997")) %>%
+  mutate(Year = 1997, 
+         ZONA_07 = Z_2007, 
+         RENDA_SM = clean_currency(VL_REN_I) / SM_1997,
+         FE_PESS = clean_currency(FE_PESS), 
+         TOT_VIAG = TOT_VIAG,
+         QT_AUTO = as.numeric(QT_AUTO), 
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG, 
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+raw_panel <- bind_rows(p97, p07, p17, p23) %>%
+  left_join(treatment_table, by = c("ZONA_07" = "ZONA")) %>% filter(!is.na(Treated))
+
+final_panel_4waves <- raw_panel %>%
+  mutate(
+    sexo_harm = case_when(SEXO == 1 ~ "Male", SEXO == 2 ~ "Female", TRUE ~ "Other"),
+    has_car = ifelse(QT_AUTO > 0, 1, 0),
+    educ_harm = case_when(
+      Year == 1997 & GRAU_INS %in% c(1,2,3) ~ "Primary_Incomplete",
+      Year == 1997 & GRAU_INS == 4 ~ "Primary_Complete",
+      Year == 1997 & GRAU_INS == 5 ~ "Secondary_Incomplete",
+      Year == 1997 & GRAU_INS %in% c(6,7) ~ "Secondary_Complete",
+      Year == 1997 & GRAU_INS == 8 ~ "Higher_Ed_Complete",
+      Year >= 2007 & GRAU_INS == 1 ~ "Primary_Incomplete",
+      Year >= 2007 & GRAU_INS == 2 ~ "Primary_Complete",
+      Year >= 2007 & GRAU_INS == 3 ~ "Secondary_Incomplete",
+      Year >= 2007 & GRAU_INS == 4 ~ "Secondary_Complete",
+      Year >= 2007 & GRAU_INS == 5 ~ "Higher_Ed_Complete",
+      TRUE ~ "Other"
+    ),
+    activity_harm = case_when(
+      CD_ATIVI == 1 ~ "Worker",
+      CD_ATIVI == 4 & Year == 1997 ~ "Unemployed",
+      CD_ATIVI == 5 & Year >= 2007 ~ "Unemployed",
+      CD_ATIVI == 8 ~ "Student",
+      CD_ATIVI == 5 & Year == 1997 ~ "Retired",
+      CD_ATIVI == 4 & Year >= 2007 ~ "Retired",
+      TRUE ~ "Other"
+    ),
+    age_group = case_when(
+      IDADE < 18 ~ "Child", IDADE >= 18 & IDADE < 30 ~ "Youth",
+      IDADE >= 30 & IDADE < 60 ~ "Adult", IDADE >= 60 ~ "Senior"
+    )
+  )
+
+panel_base <- final_panel_4waves %>% na.omit()
+
+# --- 4. CART STRATIFICATION ---
+set.seed(123)
+income_tree <- rpart(TOT_VIAG ~ RENDA_SM, 
+                     data = panel_base, method = "anova", 
+                     control = rpart.control(cp = 0.001, maxdepth = 3))
+rpart.plot(income_tree, main = "Cortes Ótimos de Renda (Volume de Viagens)", 
+           type = 4, extra = 101, box.palette = "Greens")
+
+# --- 5. DIAGNOSTIC STRATA COUNT ---
+# Assign universal income groups based on CART cuts
+panel_base <- panel_base %>%
+  mutate(
+    Income_Group = case_when(
+      RENDA_SM < 0.77 ~ "S1 (< 0.77 SM)",
+      RENDA_SM >= 0.77 & RENDA_SM < 2.01 ~ "S2 (0.77 - 2.01 SM)",
+      RENDA_SM >= 2.01 ~ "S3 (> 2.01 SM)"
+    )
+  )
+
+# Check N sizes for the 6 new strata before matching
+diagnostic_count <- panel_base %>%
+  filter(sexo_harm %in% c("Male", "Female")) %>%
+  group_by(Income_Group, sexo_harm, Treated) %>%
+  summarise(N = n(), .groups = "drop") %>%
+  pivot_wider(names_from = Treated, values_from = N, names_prefix = "Treated_")
+
+print("--- RAW OBSERVATION COUNTS FOR 6 STRATA ---")
+print(diagnostic_count)
+
+# Save Processed Base
+dir.create(here("data", "processed"), showWarnings = FALSE)
+saveRDS(panel_base, here("data", "processed", "01_panel_base_6s.rds"))
+
+```
