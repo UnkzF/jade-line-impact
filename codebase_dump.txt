@@ -1,5 +1,5 @@
 ================================================================================
-File: D:/jade-line-impact/jade-line-impact/analysis/01_setup-g_stratified.qmd
+File: ./analysis/01_setup-g_stratified.qmd
 ================================================================================
 ```
 ---
@@ -216,7 +216,7 @@ saveRDS(panel_base, here("data", "processed", "01_panel_base_9s.rds"))
 ```
 
 ================================================================================
-File: D:/jade-line-impact/jade-line-impact/analysis/01_setup.qmd
+File: ./analysis/01_setup.qmd
 ================================================================================
 ```
 ---
@@ -412,7 +412,7 @@ saveRDS(panel_base, here("data", "processed", "01_panel_base_clean.rds"))
 ```
 
 ================================================================================
-File: D:/jade-line-impact/jade-line-impact/analysis/02_matching_did-g_stratified.qmd
+File: ./analysis/02_matching_did-g_stratified.qmd
 ================================================================================
 ```
 ---
@@ -442,62 +442,74 @@ run_strata_experiment <- function(min_sm, max_sm, target_gender, strata_name, da
   
   # Dynamic Formulas based on Gender Stratification
   if (target_gender != "All") {
-    # For the specific gender slices: Pre-filter the data. exact = ~Year is enough.
     df_filtered <- df_filtered %>% filter(sexo_harm == target_gender)
-    
     form_match <- Treated ~ educ_harm + activity_harm + has_car + age_group + RENDA_SM
     form_exact <- ~ Year
-    
-    # Regression formulas without sexo_harm
     form_did_ext <- Y_Binary ~ Treated * Year_Factor + educ_harm + activity_harm + has_car + age_group
     form_did_int <- TOT_VIAG ~ Treated * Year_Factor + educ_harm + activity_harm + has_car + age_group
-    
   } else {
-    # For the Global Baseline and Income-Only Strata: Force exact matching on both Year AND Gender
     form_match <- Treated ~ educ_harm + activity_harm + has_car + age_group + RENDA_SM
     form_exact <- ~ Year + sexo_harm
-    
-    # Regression formulas with sexo_harm
     form_did_ext <- Y_Binary ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group
     form_did_int <- TOT_VIAG ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group
   }
   
-  match_obj <- matchit(
-    formula = form_match,
-    data = df_filtered, method = "nearest", distance = "mahalanobis",
-    exact = form_exact, 
-    ratio = 3, replace = FALSE 
-  )
+  # Internal Helper to run matching and DiD for a given distance method
+  run_match_method <- function(dist_method, dist_label) {
+    match_obj <- matchit(
+      formula = form_match,
+      data = df_filtered, method = "nearest", distance = dist_method,
+      exact = form_exact, ratio = 1, replace = FALSE 
+    )
+    
+    matched_data <- match.data(match_obj) %>% mutate(Strata = strata_name, Match_Type = dist_label)
+    
+    did_df <- matched_data %>%
+      mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0), Year_Factor = relevel(factor(Year), ref = "2017"))
+    
+    # FIX FOR SCOPING: Update formula environments to the current local environment
+    # so vcovCL() can find 'did_df' when it re-evaluates the model.
+    environment(form_did_ext) <- environment()
+    environment(form_did_int) <- environment()
+    
+    # Extensive Margin
+    model_ext <- lm(form_did_ext, data = did_df, weights = FE_PESS)
+    res_ext <- tidy(coeftest(model_ext, vcov = vcovCL(model_ext, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+    
+    # Intensive Margin
+    model_int <- lm(form_did_int, data = did_df, weights = FE_PESS)
+    res_int <- tidy(coeftest(model_int, vcov = vcovCL(model_int, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+    
+    n_pre <- df_filtered %>% group_by(Year, Treated) %>% summarise(N_Pre = n(), .groups = "drop")
+    n_post <- matched_data %>% group_by(Year, Treated) %>% summarise(N_Post = n(), .groups = "drop")
+    
+    sample_table <- n_pre %>%
+      left_join(n_post, by = c("Year", "Treated")) %>%
+      mutate(Grupo = ifelse(Treated == 1, "Tratado", "Controle")) %>% select(-Treated) %>%
+      pivot_wider(names_from = Grupo, values_from = c(N_Pre, N_Post), values_fill = 0) %>%
+      mutate(
+        Strata = strata_name,
+        Match_Type = dist_label,
+        DiD_Ext_Estimate = round(res_ext$estimate, 4), 
+        DiD_Ext_SE = round(res_ext$std.error, 4),      # NEW: Extract Standard Error
+        DiD_Ext_PValue = round(res_ext$p.value, 4),
+        DiD_Int_Estimate = round(res_int$estimate, 4), 
+        DiD_Int_SE = round(res_int$std.error, 4),      # NEW: Extract Standard Error
+        DiD_Int_PValue = round(res_int$p.value, 4)
+      ) %>%
+      select(Strata, Match_Type, Year, N_Pre_Controle, N_Pre_Tratado, N_Post_Controle, N_Post_Tratado, 
+             DiD_Ext_Estimate, DiD_Ext_SE, DiD_Ext_PValue, 
+             DiD_Int_Estimate, DiD_Int_SE, DiD_Int_PValue)
+    
+    # RESTORED MISSING RETURN AND CLOSING BRACKET HERE
+    return(list(sample_table = sample_table, matched_data = matched_data, match_obj = match_obj))
+  }
   
-  matched_data <- match.data(match_obj) %>% mutate(Strata = strata_name)
+  # Execute both methods
+  res_mah <- run_match_method("mahalanobis", "Mahalanobis")
+  res_log <- run_match_method("glm", "Logit")
   
-  did_df <- matched_data %>%
-    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0), Year_Factor = relevel(factor(Year), ref = "2017"))
-  
-  # Extensive Margin
-  model_ext <- lm(form_did_ext, data = did_df, weights = FE_PESS)
-  res_ext <- tidy(coeftest(model_ext, vcov = vcovCL(model_ext, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
-  
-  # Intensive Margin
-  model_int <- lm(form_did_int, data = did_df, weights = FE_PESS)
-  res_int <- tidy(coeftest(model_int, vcov = vcovCL(model_int, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
-  
-  n_pre <- df_filtered %>% group_by(Year, Treated) %>% summarise(N_Pre = n(), .groups = "drop")
-  n_post <- matched_data %>% group_by(Year, Treated) %>% summarise(N_Post = n(), .groups = "drop")
-  
-  sample_table <- n_pre %>%
-    left_join(n_post, by = c("Year", "Treated")) %>%
-    mutate(Grupo = ifelse(Treated == 1, "Tratado", "Controle")) %>% select(-Treated) %>%
-    pivot_wider(names_from = Grupo, values_from = c(N_Pre, N_Post), values_fill = 0) %>%
-    mutate(
-      Strata = strata_name,
-      DiD_Ext_Estimate = round(res_ext$estimate, 4), DiD_Ext_PValue = round(res_ext$p.value, 4),
-      DiD_Int_Estimate = round(res_int$estimate, 4), DiD_Int_PValue = round(res_int$p.value, 4)
-    ) %>%
-    select(Strata, Year, N_Pre_Controle, N_Pre_Tratado, N_Post_Controle, N_Post_Tratado, 
-           DiD_Ext_Estimate, DiD_Ext_PValue, DiD_Int_Estimate, DiD_Int_PValue)
-
-  return(list(sample_table = sample_table, matched_data = matched_data, match_obj = match_obj))
+  return(list(mah = res_mah, log = res_log))
 }
 
 # The 9 New Strata Definitions (plus the global baseline)
@@ -517,23 +529,31 @@ strata_defs <- list(
 experiments <- map(strata_defs, ~run_strata_experiment(.x[[1]], .x[[2]], .x[[3]], .x[[4]], panel_base))
 names(experiments) <- c("Full", "S1_All", "S2_All", "S3_All", "S1_Male", "S1_Female", "S2_Male", "S2_Female", "S3_Male", "S3_Female")
 
-master_sample_table <- map_dfr(experiments, "sample_table")
-master_matched_data <- map_dfr(experiments[-1], "matched_data")
+# Extract and combine tables for BOTH methods
+master_sample_table <- map_dfr(experiments, ~ bind_rows(.x$mah$sample_table, .x$log$sample_table))
+
+# For Triple Difference (DDD), run two separate models to prevent duplicating records.
+master_matched_mah <- map_dfr(experiments[-1], ~ .x$mah$matched_data) %>% mutate(Year_Factor = relevel(factor(Year), ref = "2017"))
+master_matched_log <- map_dfr(experiments[-1], ~ .x$log$matched_data) %>% mutate(Year_Factor = relevel(factor(Year), ref = "2017"))
 
 # Triple Difference (DDD) - Intensive Margin
-master_matched_data$Year_Factor <- relevel(factor(master_matched_data$Year), ref = "2017")
-mod_ddd_int <- lm(
-  TOT_VIAG ~ Treated * Year_Factor * factor(Strata) + 
-    sexo_harm + educ_harm + activity_harm + has_car + age_group, 
-  data = master_matched_data, weights = FE_PESS
-)
-res_ddd_int <- coeftest(mod_ddd_int, vcov = vcovCL(mod_ddd_int, cluster = ~ZONA_07))
+# Mahalanobis
+mod_ddd_int_mah <- lm(TOT_VIAG ~ Treated * Year_Factor * factor(Strata) 
+                      + sexo_harm + educ_harm + activity_harm + has_car 
+                      + age_group, data = master_matched_mah, weights = FE_PESS)
+res_ddd_int_mah <- coeftest(mod_ddd_int_mah, vcov = vcovCL(mod_ddd_int_mah, cluster = ~ZONA_07))
+
+# Logit
+mod_ddd_int_log <- lm(TOT_VIAG ~ Treated * Year_Factor * factor(Strata)
+                      + sexo_harm + educ_harm + activity_harm + has_car 
+                      + age_group, data = master_matched_log, weights = FE_PESS)
+res_ddd_int_log <- coeftest(mod_ddd_int_log, vcov = vcovCL(mod_ddd_int_log, cluster = ~ZONA_07))
 
 # --- EXPORT ARTIFACTS ---
 saveRDS(master_sample_table, here("data", "processed", "02_master_sample_table-9s.rds"))
-saveRDS(master_matched_data, here("data", "processed", "02_master_matched_data-9s.rds"))
+saveRDS(list(mah = master_matched_mah, log = master_matched_log), here("data", "processed", "02_master_matched_data-9s.rds"))
 saveRDS(experiments, here("data", "processed", "02_experiments_results-9s.rds"))
-saveRDS(res_ddd_int, here("data", "processed", "02_triple_diff_results-9s.rds"))
+saveRDS(list(mah = res_ddd_int_mah, log = res_ddd_int_log), here("data", "processed", "02_triple_diff_results-9s.rds"))
 ```
 
 
@@ -583,7 +603,7 @@ ggdid(es_contra)
 ```
 
 ================================================================================
-File: D:/jade-line-impact/jade-line-impact/analysis/02_matching_did.qmd
+File: ./analysis/02_matching_did.qmd
 ================================================================================
 ```
 ---
@@ -682,7 +702,7 @@ saveRDS(res_ddd_int, here("data", "processed", "02_triple_diff_results.rds"))
 ```
 
 ================================================================================
-File: D:/jade-line-impact/jade-line-impact/analysis/03_diagnostics-g_stratified.qmd
+File: ./analysis/03_diagnostics-g_stratified.qmd
 ================================================================================
 ```
 ---
@@ -766,19 +786,33 @@ gerar_pca <- function(matched_data, strata_name,
     )
 }
 
-gerar_plots_tendencia <- function(strata_data, strata_name,
+gerar_ps_overlap <- function(match_obj, strata_name, font_family = "sans") {
+  bal.plot(match_obj, var.name = "distance", which = "both", type = "density", mirror = FALSE) +
+    scale_fill_manual(values = c("0" = scales::alpha("#483d3f", 0.6), "1" = scales::alpha("#058ed9", 0.6))) +
+    scale_color_manual(values = c("0" = "#483d3f", "1" = "#058ed9")) +
+    labs(title = paste("P-Score Overlap (Logit) -", strata_name)) +
+    theme_minimal(base_family = font_family) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(face = "bold", size = 12),
+      legend.position = "bottom",
+      legend.title = element_blank()
+    )
+}
+
+gerar_plots_tendencia <- function(strata_data, strata_name, full_data,
                                   font_family = "sans",
                                   color_ctrl_full = "#a39a92",
-                                  color_trt_full = "#77685d",
+                                  color_trt_full = "#058ed9",
                                   color_ctrl_strata = "#483d3f",
                                   color_trt_strata = "#058ed9",
-                                  linetype_full = "dashed",  # Line type for the Global Baseline
-                                  linetype_strata = "solid", # Line type for the specific Strata
+                                  linetype_full = "dashed",  
+                                  linetype_strata = "solid", 
                                   y_breaks_ext = waiver(),
                                   y_breaks_int = waiver(),
                                   x_breaks = c(1997, 2007, 2017, 2023)) {
   
-  full_trend <- experiments$Full$matched_data %>%
+  full_trend <- full_data %>%
     mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0)) %>%
     group_by(Year, Treated) %>%
     summarise(
@@ -800,10 +834,8 @@ gerar_plots_tendencia <- function(strata_data, strata_name,
   cores <- setNames(c(color_ctrl_full, color_trt_full, color_ctrl_strata, color_trt_strata),
                     c("Control (Full)", "Treated (Full)", paste("Control", strata_name), paste("Treated", strata_name)))
   
-  # Injecting the new parameters here:
   linhas <- setNames(c(linetype_full, linetype_strata), c("Baseline Global", strata_name))
   
-  # Centralized aesthetic logic for both plots
   custom_theme <- theme_minimal(base_family = font_family) + 
     theme(
       legend.position = "bottom",
@@ -836,196 +868,179 @@ gerar_plots_tendencia <- function(strata_data, strata_name,
 
 ```
 
-::: panel-tabset
-## S1: All (\< 0.77 SM)
-
 ```{r}
-#| layout-ncol: 2
+#| label: render-html-tabsets
+#| results: "asis"
+#| fig-width: 8
+#| fig-height: 5
+#| warning: false
+#| message: false
 
-gerar_pca(experiments$S1_All$matched_data, "S1 All", font_family = "NHG")
-love.plot(experiments$S1_All$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S1 All") + 
-  theme_minimal(base_family = "NHG")
+strata_keys <- c("Full", "S1_All", "S1_Male", "S1_Female", 
+                 "S2_All", "S2_Male", "S2_Female", 
+                 "S3_All", "S3_Male", "S3_Female")
+
+cat("::: panel-tabset\n\n")
+
+for (s in strata_keys) {
+  cat(paste0("## ", s, "\n\n"))
+  
+  # --- MAHALANOBIS SUB-TAB ---
+  cat("### Mahalanobis\n\n")
+  
+  p_pca_m <- gerar_pca(experiments[[s]]$mah$matched_data, paste(s, "(Mahalanobis)"), font_family = "NHG")
+  p_love_m <- love.plot(experiments[[s]]$mah$match_obj, binary = "std", continuous = "std", 
+                        abs = TRUE, thresholds = c(m = .1), title = paste("SMD -", s, "(Mah)")) + 
+              theme_minimal(base_family = "NHG")
+  
+  print(p_pca_m)
+  cat("\n\n")
+  print(p_love_m)
+  cat("\n\n")
+  
+  t_mah <- gerar_plots_tendencia(
+    strata_data = experiments[[s]]$mah$matched_data, 
+    strata_name = s, 
+    full_data = experiments$Full$mah$matched_data, 
+    font_family = "NHG"
+  )
+  
+  print(t_mah$ext)
+  cat("\n\n")
+  print(t_mah$int)
+  cat("\n\n")
+  
+  # --- LOGIT SUB-TAB ---
+  cat("### Logit (Propensity Score)\n\n")
+  
+  p_pca_l <- gerar_pca(experiments[[s]]$log$matched_data, paste(s, "(Logit)"), font_family = "NHG")
+  p_love_l <- love.plot(experiments[[s]]$log$match_obj, binary = "std", continuous = "std", 
+                        abs = TRUE, thresholds = c(m = .1), title = paste("SMD -", s, "(Logit)")) + 
+              theme_minimal(base_family = "NHG")
+  
+  print(p_pca_l)
+  cat("\n\n")
+  print(p_love_l)
+  cat("\n\n")
+  
+  t_log <- gerar_plots_tendencia(
+    strata_data = experiments[[s]]$log$matched_data, 
+    strata_name = s, 
+    full_data = experiments$Full$log$matched_data, 
+    font_family = "NHG"
+  )
+  
+  print(t_log$ext)
+  cat("\n\n")
+  print(t_log$int)
+  cat("\n\n")
+  
+  p_ps <- gerar_ps_overlap(experiments[[s]]$log$match_obj, s, font_family = "NHG")
+  print(p_ps)
+  cat("\n\n")
+}
+
+cat(":::\n\n")
+
 
 ```
 
 ```{r}
-#| layout-ncol: 2
+#| label: compare-coefficients
+#| fig-width: 10
+#| fig-height: 8
 
-t_s1_a <- gerar_plots_tendencia(experiments$S1_All$matched_data, "S1_All", font_family = "NHG")
-t_s1_a$ext
-t_s1_a$int
+library(ggplot2)
+library(dplyr)
+
+# Calculate 95% (1.96) and 90% (1.645) Confidence Intervals
+coef_data <- master_table %>%
+  filter(Year == 2023) %>% # Keep only the final treatment year evaluation
+  mutate(
+    # Extensive Margin CIs
+    Ext_CI_95_Low = DiD_Ext_Estimate - (1.96 * DiD_Ext_SE),
+    Ext_CI_95_High = DiD_Ext_Estimate + (1.96 * DiD_Ext_SE),
+    Ext_CI_90_Low = DiD_Ext_Estimate - (1.645 * DiD_Ext_SE),
+    Ext_CI_90_High = DiD_Ext_Estimate + (1.645 * DiD_Ext_SE),
+    
+    # Intensive Margin CIs
+    Int_CI_95_Low = DiD_Int_Estimate - (1.96 * DiD_Int_SE),
+    Int_CI_95_High = DiD_Int_Estimate + (1.96 * DiD_Int_SE),
+    Int_CI_90_Low = DiD_Int_Estimate - (1.645 * DiD_Int_SE),
+    Int_CI_90_High = DiD_Int_Estimate + (1.645 * DiD_Int_SE),
+    
+    Strata = factor(Strata, levels = rev(unique(Strata))) # Reverse for top-to-bottom plotting
+  )
+
+# 1. Plot Extensive Margin Comparison
+p_coef_ext <- ggplot(coef_data, aes(y = Strata, color = Match_Type)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 1) +
+  # 95% CI (Thinner, transparent)
+  geom_linerange(aes(xmin = Ext_CI_95_Low, xmax = Ext_CI_95_High), 
+                 position = position_dodge(width = 0.6), linewidth = 0.5, alpha = 0.6) +
+  # 90% CI (Thicker, solid)
+  geom_linerange(aes(xmin = Ext_CI_90_Low, xmax = Ext_CI_90_High), 
+                 position = position_dodge(width = 0.6), linewidth = 1.2) +
+  # Point estimate
+  geom_point(aes(x = DiD_Ext_Estimate), 
+             position = position_dodge(width = 0.6), size = 2.5) +
+  scale_color_manual(values = c("Mahalanobis" = "#058ed9", "Logit" = "#E69F00")) +
+  labs(title = "DiD Coefficient Comparison: Extensive Margin",
+       subtitle = "Thick lines denote 90% CI; Thin lines denote 95% CI",
+       x = "Treatment Effect Estimate (Probability of making a trip)",
+       y = NULL,
+       color = "Matching Method") +
+  theme_minimal(base_family = "NHG") +
+  theme(legend.position = "bottom", 
+        plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(color = "gray30", size = 10))
+
+# 2. Plot Intensive Margin Comparison
+p_coef_int <- ggplot(coef_data, aes(y = Strata, color = Match_Type)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 1) +
+  # 95% CI (Thinner, transparent)
+  geom_linerange(aes(xmin = Int_CI_95_Low, xmax = Int_CI_95_High), 
+                 position = position_dodge(width = 0.6), linewidth = 0.5, alpha = 0.6) +
+  # 90% CI (Thicker, solid)
+  geom_linerange(aes(xmin = Int_CI_90_Low, xmax = Int_CI_90_High), 
+                 position = position_dodge(width = 0.6), linewidth = 1.2) +
+  # Point estimate
+  geom_point(aes(x = DiD_Int_Estimate), 
+             position = position_dodge(width = 0.6), size = 2.5) +
+  scale_color_manual(values = c("Mahalanobis" = "#058ed9", "Logit" = "#E69F00")) +
+  labs(title = "DiD Coefficient Comparison: Intensive Margin",
+       subtitle = "Thick lines denote 90% CI; Thin lines denote 95% CI",
+       x = "Treatment Effect Estimate (Number of Trips)",
+       y = NULL,
+       color = "Matching Method") +
+  theme_minimal(base_family = "NHG") +
+  theme(legend.position = "bottom", 
+        plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(color = "gray30", size = 10))
+
+print(p_coef_ext)
+print(p_coef_int)
 
 ```
 
-## S1: Men (\< 0.77 SM)
 
 ```{r}
-#| layout-ncol: 2
+#| label: calculate-balance-metrics
 
-gerar_pca(experiments$S1_Male$matched_data, "S1 Male", font_family = "NHG")
-love.plot(experiments$S1_Male$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S1 Male") + 
-  theme_minimal(base_family = "NHG")
+# Extract balance summary for a specific stratum to compare numerically
+# Example: S1_All
+bal_mah <- bal.tab(experiments$S1_All$mah$match_obj, un = FALSE)$Balance
+bal_log <- bal.tab(experiments$S1_All$log$match_obj, un = FALSE)$Balance
 
-```
+mean_smd_mah <- mean(abs(bal_mah$Diff.Adj), na.rm = TRUE)
+mean_smd_log <- mean(abs(bal_log$Diff.Adj), na.rm = TRUE)
 
-```{r}
-#| layout-ncol: 2
+cat("Mean Absolute SMD (S1_All)\n")
+cat("Mahalanobis:", round(mean_smd_mah, 4), "\n")
+cat("Logit:      ", round(mean_smd_log, 4), "\n")
 
-t_s1_m <- gerar_plots_tendencia(experiments$S1_Male$matched_data, "S1_Male", font_family = "NHG")
-t_s1_m$ext
-t_s1_m$int
-
-```
-
-## S1: Women (\< 0.77 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S1_Female$matched_data, "S1 Female", font_family = "NHG")
-love.plot(experiments$S1_Female$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S1 Female") + 
-  theme_minimal(base_family = "NHG")
 
 ```
-
-```{r}
-#| layout-ncol: 2
-
-t_s1_f <- gerar_plots_tendencia(experiments$S1_Female$matched_data, "S1_Female", font_family = "NHG")
-t_s1_f$ext
-t_s1_f$int
-
-```
-
-## S2: All (0.77-2.01 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S2_All$matched_data, "S2 All", font_family = "NHG")
-love.plot(experiments$S2_All$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S2 All") + 
-  theme_minimal(base_family = "NHG")
-
-```
-
-```{r}
-#| layout-ncol: 2
-
-t_s2_a <- gerar_plots_tendencia(experiments$S2_All$matched_data, "S2_All", font_family = "NHG")
-t_s2_a$ext
-t_s2_a$int
-
-```
-
-## S2: Men (0.77-2.01 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S2_Male$matched_data, "S2 Male", font_family = "NHG")
-love.plot(experiments$S2_Male$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S2 Male") + 
-  theme_minimal(base_family = "NHG")
-
-```
-
-```{r}
-#| layout-ncol: 2
-
-t_s2_m <- gerar_plots_tendencia(experiments$S2_Male$matched_data, "S2_Male", font_family = "NHG")
-t_s2_m$ext
-t_s2_m$int
-
-```
-
-## S2: Women (0.77-2.01 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S2_Female$matched_data, "S2 Female", font_family = "NHG")
-love.plot(experiments$S2_Female$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S2 Female") + 
-  theme_minimal(base_family = "NHG")
-
-```
-
-```{r}
-#| layout-ncol: 2
-
-t_s2_f <- gerar_plots_tendencia(experiments$S2_Female$matched_data, "S2_Female", font_family = "NHG")
-t_s2_f$ext
-t_s2_f$int
-
-```
-
-## S3: All (\> 2.01 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S3_All$matched_data, "S3 All", font_family = "NHG")
-love.plot(experiments$S3_All$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S3 All") + 
-  theme_minimal(base_family = "NHG")
-
-```
-
-```{r}
-#| layout-ncol: 2
-
-t_s3_a <- gerar_plots_tendencia(experiments$S3_All$matched_data, "S3_All", font_family = "NHG")
-t_s3_a$ext
-t_s3_a$int
-
-```
-
-## S3: Men (\> 2.01 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S3_Male$matched_data, "S3 Male", font_family = "NHG")
-love.plot(experiments$S3_Male$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S3 Male") + 
-  theme_minimal(base_family = "NHG")
-
-```
-
-```{r}
-#| layout-ncol: 2
-
-t_s3_m <- gerar_plots_tendencia(experiments$S3_Male$matched_data, "S3_Male", font_family = "NHG")
-t_s3_m$ext
-t_s3_m$int
-
-```
-
-## S3: Women (\> 2.01 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S3_Female$matched_data, "S3 Female", font_family = "NHG")
-love.plot(experiments$S3_Female$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S3 Female") + 
-  theme_minimal(base_family = "NHG")
-
-```
-
-```{r}
-#| layout-ncol: 2
-
-t_s3_f <- gerar_plots_tendencia(experiments$S3_Female$matched_data, "S3_Female", font_family = "NHG")
-t_s3_f$ext
-t_s3_f$int
-
-```
-:::
 
 ```{r}
 
@@ -1033,53 +1048,64 @@ t_s3_f$int
 #| message: false
 #| warning: false
 
-# 1. Define the new strata keys
-strata_keys <- c("S1_Male", "S1_Female", "S2_Male", "S2_Female", "S3_Male", "S3_Female")
+# 1. Define all strata keys (Full + 9 splits)
+strata_keys <- c("Full", "S1_All", "S1_Male", "S1_Female", 
+                 "S2_All", "S2_Male", "S2_Female", 
+                 "S3_All", "S3_Male", "S3_Female")
 
-# 2. Loop through and export all plots as vector SVG
+# 2. Loop through and export all plots
 for (s in strata_keys) {
   
-  p_pca <- gerar_pca(
-    matched_data = experiments[[s]]$matched_data, 
-    strata_name = s,
-    font_family = "NHG"
-  )
-  ggsave(here("outputs", "figures", paste0("pca_overlap_", s, ".png")), 
-         plot = p_pca, device = "png", width = 8, height = 6, bg = "white")
+  # A. Export Mahalanobis and Logit outputs
+  for (method in c("mah", "log")) {
+    method_label <- toupper(method)
+    
+    # PCA
+    p_pca <- gerar_pca(experiments[[s]][[method]]$matched_data, 
+                       paste(s, method_label), font_family = "NHG")
+    ggsave(here("outputs", "figures", paste0("pca_overlap_", s, "_", method, ".png")), 
+           plot = p_pca, device = "png", width = 8, height = 6, bg = "white")
+    
+    # Love Plot
+    p_love <- love.plot(experiments[[s]][[method]]$match_obj, binary = "std", continuous = "std", 
+                        abs = TRUE, thresholds = c(m = .1), 
+                        title = paste("Balanço SMD -", s, method_label)) + 
+      theme_minimal(base_family = "NHG") +
+      theme(plot.title = element_text(face = "bold"))
+    
+    ggsave(here("outputs", "figures", paste0("love_plot_", s, "_", method, ".png")), 
+           plot = p_love, device = "png", width = 8, height = 6, bg = "white")
+    
+    # Trends (Extensive & Intensive) - FIX: Added full_data parameter here
+    p_trends <- gerar_plots_tendencia(
+      strata_data = experiments[[s]][[method]]$matched_data, 
+      strata_name = s, 
+      full_data = experiments$Full[[method]]$matched_data,
+      font_family = "NHG"
+    )
+    
+    ggsave(here("outputs", "figures", paste0("trend_extensive_", s, "_", method, ".png")), 
+           plot = p_trends$ext, device = "png", width = 8, height = 5, bg = "white")
+    
+    ggsave(here("outputs", "figures", paste0("trend_intensive_", s, "_", method, ".png")), 
+           plot = p_trends$int, device = "png", width = 8, height = 5, bg = "white")
+  }
   
-  p_love <- love.plot(experiments[[s]]$match_obj, binary = "std", continuous = "std", 
-                      abs = TRUE, thresholds = c(m = .1), 
-                      title = paste("Balanço SMD -", s)) + 
-    theme_minimal(base_family = "NHG") +
-    theme(plot.title = element_text(face = "bold"))
-  
-  ggsave(here("outputs", "figures", paste0("love_plot_", s, ".png")), 
-         plot = p_love, device = "png", width = 8, height = 6, bg = "white")
-  
-  p_trends <- gerar_plots_tendencia(
-    strata_data = experiments[[s]]$matched_data, 
-    strata_name = s,
-    font_family = "NHG"
-  )
-  
-  ggsave(here("outputs", "figures", paste0("trend_extensive_", s, ".png")), 
-         plot = p_trends$ext, device = "png", width = 8, height = 5, bg = "white")
-  
-  ggsave(here("outputs", "figures", paste0("trend_intensive_", s, ".png")), 
-         plot = p_trends$int, device = "png", width = 8, height = 5, bg = "white")
+  # B. Export P-Score Overlap (Only applies to Logit)
+  p_ps <- gerar_ps_overlap(experiments[[s]]$log$match_obj, s, font_family = "NHG")
+  ggsave(here("outputs", "figures", paste0("pscore_overlap_", s, ".png")), 
+         plot = p_ps, device = "png", width = 8, height = 6, bg = "white")
 }
 
-# 4. Export the Master Table
-write_csv(master_table, here("outputs", "tables", "master_sample_table-6s.csv"))
-
-message("(EN) All Vector Plots (.png) and Data were exported to 'outputs/' folder!")
+write_csv(master_table, here("outputs", "tables", "master_sample_table-9s.csv"))
+message("(EN) All Vector Plots (.png) for Mahalanobis and Logit methods were exported to 'outputs/'!")
 
 
 ```
 ```
 
 ================================================================================
-File: D:/jade-line-impact/jade-line-impact/analysis/03_diagnostics.qmd
+File: ./analysis/03_diagnostics.qmd
 ================================================================================
 ```
 ---
@@ -1347,7 +1373,214 @@ message("(PT) Todos os gráficos e tabelas foram exportados com sucesso para a p
 ```
 
 ================================================================================
-File: D:/jade-line-impact/jade-line-impact/jade-line-impact.qmd
+File: ./analysis/04_comparison-matching.qmd
+================================================================================
+```
+---
+title: "04_comparison-matching"
+editor: visual
+---
+
+```{r}
+#| title: Setup & Library Load
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+```
+
+```{r}
+#| title: Data Import & Merging
+
+# Load datasets
+path_3 <- "C:/Users/pedro/Documents/2026/Mestrado/jade-line-bkps/jade-line-impact/data/processed/02_master_sample_table-9s.rds"
+path_1 <- "D:/jade-line-impact/jade-line-impact/data/processed/02_master_sample_table-9s.rds"
+
+match3 <- readRDS(path_3)
+match1 <- readRDS(path_1)
+
+# Define columns to merge on and core metrics to analyze
+join_keys <- c("Strata", "Match_Type", "Year")
+metrics <- c("DiD_Ext_Estimate", "DiD_Ext_PValue", "DiD_Int_Estimate", "DiD_Int_PValue")
+
+# Join into a single master frame and isolate the post-treatment period
+master_comp_post <- match3 %>%
+  select(all_of(c(join_keys, metrics))) %>%
+  inner_join(
+    match1 %>% select(all_of(c(join_keys, metrics))),
+    by = join_keys,
+    suffix = c("_3", "_1")
+  ) %>%
+  filter(Year == 2023) # Filters out pre-treatment years (1997, 2007, 2017)
+
+```
+
+```{r}
+#| title: Reshaping for Analysis
+
+# Define alpha for significance
+alpha_level <- 0.10
+
+# A. Ratio Comparison Data (Flagging 1:1 vs 1:3 significance)
+ratio_data <- master_comp_post %>%
+  mutate(
+    Abs_Diff_Ext = DiD_Ext_Estimate_3 - DiD_Ext_Estimate_1,
+    Pct_Diff_Ext = (Abs_Diff_Ext / DiD_Ext_Estimate_1) * 100,
+    
+    # Create categorical significance flag
+    Sig_1 = DiD_Ext_PValue_1 < alpha_level,
+    Sig_3 = DiD_Ext_PValue_3 < alpha_level,
+    Significance = case_when(
+      Sig_1 & Sig_3   ~ "Significant in Both",
+      !Sig_1 & !Sig_3 ~ "Not Significant",
+      Sig_1 & !Sig_3  ~ "Significant only in 1:1",
+      !Sig_1 & Sig_3  ~ "Significant only in 1:3"
+    ),
+    # Lock the factor levels for consistent legend ordering
+    Significance = factor(Significance, levels = c("Significant in Both", "Significant only in 1:3", "Significant only in 1:1", "Not Significant"))
+  )
+
+# B. Algorithm Comparison Data (Flagging Logit vs Mahalanobis significance)
+algo_data <- master_comp_post %>%
+  select(Strata, Year, Match_Type, 
+         DiD_Ext_Estimate_1, DiD_Ext_Estimate_3,
+         DiD_Ext_PValue_1, DiD_Ext_PValue_3) %>%
+  # Rename to simplify the simultaneous pivot of estimates and p-values
+  rename(
+    Estimate_1 = DiD_Ext_Estimate_1, Estimate_3 = DiD_Ext_Estimate_3,
+    PValue_1 = DiD_Ext_PValue_1, PValue_3 = DiD_Ext_PValue_3
+  ) %>%
+  pivot_longer(
+    cols = c(Estimate_1, Estimate_3, PValue_1, PValue_3),
+    names_to = c(".value", "Ratio"),
+    names_sep = "_"
+  ) %>%
+  mutate(Ratio = ifelse(Ratio == "1", "1:1 Ratio", "1:3 Ratio")) %>%
+  pivot_wider(
+    names_from = Match_Type,
+    values_from = c(Estimate, PValue)
+  ) %>%
+  mutate(
+    Abs_Diff_Algo = Estimate_Mahalanobis - Estimate_Logit,
+    
+    # Create categorical significance flag for algorithms
+    Sig_Logit = PValue_Logit < alpha_level,
+    Sig_Mahal = PValue_Mahalanobis < alpha_level,
+    Significance = case_when(
+      Sig_Logit & Sig_Mahal   ~ "Significant in Both",
+      !Sig_Logit & !Sig_Mahal ~ "Not Significant",
+      Sig_Logit & !Sig_Mahal  ~ "Significant only in Logit",
+      !Sig_Logit & Sig_Mahal  ~ "Significant only in Mahalanobis"
+    ),
+    Significance = factor(Significance, levels = c("Significant in Both", "Significant only in Mahalanobis", "Significant only in Logit", "Not Significant"))
+  )
+
+
+```
+
+
+```{r}
+#| title: Numerical Diagnostics (RMSE & Divergence Summaries)
+#| eval: false
+
+# Quantify how much 1:3 drifts from 1:1, separated by matching algorithm
+ratio_summary <- ratio_data %>%
+  group_by(Match_Type) %>%
+  summarise(
+    Mean_Estimate_1 = mean(DiD_Ext_Estimate_1, na.rm = TRUE),
+    Mean_Estimate_3 = mean(DiD_Ext_Estimate_3, na.rm = TRUE),
+    RMSE_Ratio      = sqrt(mean(Abs_Diff_Ext^2, na.rm = TRUE)),
+    Max_Abs_Drift   = max(abs(Abs_Diff_Ext), na.rm = TRUE)
+  )
+
+# Quantify how much Mahalanobis drifts from Logit, separated by Ratio
+algo_summary <- algo_data %>%
+  group_by(Ratio) %>%
+  summarise(
+    Mean_Logit       = mean(Logit, na.rm = TRUE),
+    Mean_Mahalanobis = mean(Mahalanobis, na.rm = TRUE),
+    RMSE_Algo        = sqrt(mean(Abs_Diff_Algo^2, na.rm = TRUE)),
+    Max_Abs_Drift    = max(abs(Abs_Diff_Algo), na.rm = TRUE)
+  )
+
+print("--- Stability Across Ratios (1:1 vs 1:3) ---")
+print(ratio_summary)
+print("--- Stability Across Algorithms (Logit vs Mahalanobis) ---")
+print(algo_summary)
+
+```
+
+```{r}
+#| title: Visualizations
+
+# Define a custom color palette for significance states
+sig_colors <- c(
+  "Significant in Both" = "#27ae60",       # Green
+  "Significant only in 1:3" = "#d35400",   # Orange
+  "Significant only in 1:1" = "#f39c12",   # Yellow
+  "Significant only in Mahalanobis" = "#9b59b6", # Purple
+  "Significant only in Logit" = "#e74c3c",       # Red
+  "Not Significant" = "#bdc3c7"            # Gray
+)
+
+# Base theme
+theme_jade <- theme_light() +
+  theme(
+    strip.text = element_text(size = 11, face = "bold", color = "white"),
+    strip.background = element_rect(fill = "#2c3e50"),
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  )
+
+# Plot A: Ratio Stability (Faceted by Algorithm, Colored by Significance)
+p_ratio <- ggplot(ratio_data, aes(x = DiD_Ext_Estimate_1, y = DiD_Ext_Estimate_3, 
+                                  color = Significance, shape = Significance)) +
+  geom_point(alpha = 0.8, size = 3) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "#2c3e50", linewidth = 0.8) +
+  scale_color_manual(values = sig_colors) +
+  # Use solid circles for both/neither, triangles/squares for mixed results
+  scale_shape_manual(values = c(16, 17, 15, 1)) + 
+  facet_wrap(~Match_Type) +
+  labs(
+    title = "Estimate Stability (2023): 1:1 vs 1:3 Matching Ratio",
+    subtitle = "Dashed line denotes perfect agreement. Colors map to p < 0.10",
+    x = "External DiD Estimate (1:1)",
+    y = "External DiD Estimate (1:3)",
+    color = "Significance (p < 0.05)",
+    shape = "Significance (p < 0.05)"
+  ) +
+  theme_jade
+
+# Plot B: Algorithm Stability (Faceted by Ratio, Colored by Significance)
+p_algo <- ggplot(algo_data, aes(x = Estimate_Logit, y = Estimate_Mahalanobis, 
+                                color = Significance, shape = Significance)) +
+  geom_point(alpha = 0.8, size = 3) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "#2c3e50", linewidth = 0.8) +
+  scale_color_manual(values = sig_colors) +
+  scale_shape_manual(values = c(16, 17, 15, 1)) +
+  facet_wrap(~Ratio) +
+  labs(
+    title = "Algorithm Consistency (2023): Logit vs Mahalanobis",
+    subtitle = "Dashed line denotes perfect agreement. Colors map to p < 0.10",
+    x = "External DiD Estimate (Logit)",
+    y = "External DiD Estimate (Mahalanobis)",
+    color = "Significance (p < 0.05)",
+    shape = "Significance (p < 0.05)"
+  ) +
+  theme_jade
+
+# Render plots
+print(p_ratio)
+print(p_algo)
+
+```
+
+```
+
+================================================================================
+File: ./jade-line-impact.qmd
 ================================================================================
 ```
 ---
@@ -1364,7 +1597,7 @@ Quarto enables you to weave together content and executable code into a finished
 ```
 
 ================================================================================
-File: D:/jade-line-impact/jade-line-impact/R/spatial_helpers.R
+File: ./R/spatial_helpers.R
 ================================================================================
 ```
 # R/spatial_helpers.R

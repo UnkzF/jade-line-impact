@@ -32,6 +32,8 @@ library(tidyverse)
 library(cobalt)
 library(ggplot2)
 library(here)
+library(rbounds)
+library(DescTools)
 
 experiments <- readRDS(here("data", "processed", "02_experiments_results-9s.rds"))
 master_table <- readRDS(here("data", "processed", "02_master_sample_table-9s.rds"))
@@ -50,40 +52,16 @@ knitr::kable(master_table, caption = "Sample Size & DiD Estimates per Stratum")
 ```{r}
 #| label: diagnostic-functions
 
-gerar_pca <- function(matched_data, strata_name, 
-                      font_family = "sans", 
-                      color_ctrl = "#999999", 
-                      color_trt = "#E69F00") {
+# 1. Distribution / Overlap Plots (Handles both PSM, MDM, and CEM)
+gerar_dist_overlap <- function(match_obj, var_name, strata_name, method_label, font_family = "sans") {
+  plot_title <- ifelse(var_name == "distance", 
+                       paste("P-Score Overlap -", strata_name, "(Logit)"),
+                       paste("Covariate Overlap (", var_name, ") -", strata_name, "(", method_label, ")"))
   
-  covariates <- matched_data %>%
-    select(sexo_harm, educ_harm, activity_harm, has_car, age_group, RENDA_SM) %>%
-    mutate(across(where(is.character), as.factor), across(where(is.factor), as.numeric)) %>%
-    select(where(~ var(.x, na.rm = TRUE) > 0))
-  
-  pca_res <- prcomp(covariates, scale. = TRUE)
-  plot_data_pca <- matched_data %>%
-    mutate(PC1 = pca_res$x[, 1], PC2 = pca_res$x[, 2],
-           Status = ifelse(Treated == 1, "Treated", "Control (Counterfactual)"))
-  
-  ggplot(plot_data_pca, aes(x = PC1, y = PC2, color = Status, fill = Status)) +
-    stat_density_2d(aes(alpha = after_stat(level)), geom = "polygon", bins = 5) +
-    geom_point(alpha = 0.4, size = 1) +
-    scale_color_manual(values = c("Control (Counterfactual)" = color_ctrl, "Treated" = color_trt)) +
-    scale_fill_manual(values = c("Control (Counterfactual)" = color_ctrl, "Treated" = color_trt)) +
-    labs(title = paste("PCA Overlap -", strata_name)) + 
-    theme_minimal(base_family = font_family) +
-    theme(
-      plot.title = element_text(face = "bold", size = 14),
-      axis.title = element_text(face = "bold", size = 12),
-      axis.text = element_text(size = 10)
-    )
-}
-
-gerar_ps_overlap <- function(match_obj, strata_name, font_family = "sans") {
-  bal.plot(match_obj, var.name = "distance", which = "both", type = "density", mirror = FALSE) +
+  bal.plot(match_obj, var.name = var_name, which = "both", type = "density", mirror = FALSE) +
     scale_fill_manual(values = c("0" = scales::alpha("#483d3f", 0.6), "1" = scales::alpha("#058ed9", 0.6))) +
     scale_color_manual(values = c("0" = "#483d3f", "1" = "#058ed9")) +
-    labs(title = paste("P-Score Overlap (Logit) -", strata_name)) +
+    labs(title = plot_title) +
     theme_minimal(base_family = font_family) +
     theme(
       plot.title = element_text(face = "bold", size = 14),
@@ -93,50 +71,103 @@ gerar_ps_overlap <- function(match_obj, strata_name, font_family = "sans") {
     )
 }
 
+# 2. Extract Variance Ratios, Rubin's B, Rubin's R, and SMD Summaries
+extrair_metricas_rubin_vr <- function(match_obj, matched_data, method_label) {
+  # Extract Variance Ratios and SMDs from cobalt
+  bal <- bal.tab(match_obj, un = FALSE, disp.v.ratio = TRUE)$Balance
+  
+  max_smd <- max(abs(bal$Diff.Adj), na.rm = TRUE)
+  v_ratios <- bal$V.Ratio.Adj[!is.na(bal$V.Ratio.Adj)]
+  
+  # Protect against Inf or NA variance ratios
+  v_ratios <- v_ratios[is.finite(v_ratios)]
+  max_vr <- ifelse(length(v_ratios) > 0, max(v_ratios), NA)
+  min_vr <- ifelse(length(v_ratios) > 0, min(v_ratios), NA)
+  
+  # Calculate Rubin's B and R
+  # Dynamically build the formula to exclude zero-variance predictors (like sexo_harm in gender-specific strata)
+  potential_vars <- c("sexo_harm", "educ_harm", "activity_harm", "has_car", "age_group", "RENDA_SM")
+  valid_vars <- potential_vars[sapply(potential_vars, function(v) length(unique(matched_data[[v]])) > 1)]
+  
+  if (length(valid_vars) > 0) {
+    form_str <- paste("Treated ~", paste(valid_vars, collapse = " + "))
+  } else {
+    form_str <- "Treated ~ 1"
+  }
+  
+  mod_ps <- glm(as.formula(form_str), family = binomial(link = "logit"), data = matched_data)
+  
+  linear_ps <- predict(mod_ps, type = "link")
+  
+  var_trt <- var(linear_ps[matched_data$Treated == 1])
+  var_ctrl <- var(linear_ps[matched_data$Treated == 0])
+  mean_trt <- mean(linear_ps[matched_data$Treated == 1])
+  mean_ctrl <- mean(linear_ps[matched_data$Treated == 0])
+  
+  rubin_b <- abs(mean_trt - mean_ctrl) / sqrt((var_trt + var_ctrl) / 2) * 100
+  rubin_r <- var_trt / var_ctrl
+  
+  return(data.frame(
+    Method = method_label,
+    Max_SMD = round(max_smd, 3),
+    Min_Var_Ratio = round(min_vr, 3),
+    Max_Var_Ratio = round(max_vr, 3),
+    Rubin_B = round(rubin_b, 1),
+    Rubin_R = round(rubin_r, 2)
+  ))
+}
+
+# 3. Rosenbaum Bounds for Hidden Bias (Sensitivity Analysis)
+run_rosenbaum_bounds <- function(matched_data, outcome_var = "TOT_VIAG") {
+  if (!"subclass" %in% names(matched_data)) return(NULL)
+  
+  paired <- matched_data %>% filter(!is.na(subclass)) %>% arrange(subclass, desc(Treated))
+  
+  y_trt <- paired[[outcome_var]][paired$Treated == 1]
+  y_ctrl <- paired[[outcome_var]][paired$Treated == 0]
+  
+  if(length(y_trt) == length(y_ctrl) && length(y_trt) > 0) {
+    bounds <- psens(y_trt, y_ctrl, Gamma = 2, GammaInc = 0.2)
+    return(bounds)
+  } else {
+    return(NULL)
+  }
+}
+
+# 4. Parallel Trends
 gerar_plots_tendencia <- function(strata_data, strata_name, full_data,
                                   font_family = "sans",
-                                  color_ctrl_full = "#a39a92",
-                                  color_trt_full = "#058ed9",
-                                  color_ctrl_strata = "#483d3f",
-                                  color_trt_strata = "#058ed9",
-                                  linetype_full = "dashed",  
-                                  linetype_strata = "solid", 
-                                  y_breaks_ext = waiver(),
-                                  y_breaks_int = waiver(),
+                                  color_ctrl_full = "#a39a92", color_trt_full = "#058ed9",
+                                  color_ctrl_strata = "#483d3f", color_trt_strata = "#058ed9",
+                                  linetype_full = "dashed", linetype_strata = "solid", 
+                                  y_breaks_ext = waiver(), y_breaks_int = waiver(),
                                   x_breaks = c(1997, 2007, 2017, 2023)) {
   
   full_trend <- full_data %>%
     mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0)) %>%
     group_by(Year, Treated) %>%
-    summarise(
-      Extensive = weighted.mean(Y_Binary, w = FE_PESS, na.rm = TRUE),
-      Intensive = weighted.mean(TOT_VIAG, w = FE_PESS, na.rm = TRUE), .groups = "drop"
-    ) %>%
+    summarise(Extensive = weighted.mean(Y_Binary, w = FE_PESS, na.rm = TRUE),
+              Intensive = weighted.mean(TOT_VIAG, w = FE_PESS, na.rm = TRUE), .groups = "drop") %>%
     mutate(Grupo = ifelse(Treated == 1, "Treated (Full)", "Control (Full)"), Contexto = "Baseline Global")
   
   strata_trend <- strata_data %>%
     mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0)) %>%
     group_by(Year, Treated) %>%
-    summarise(
-      Extensive = weighted.mean(Y_Binary, w = FE_PESS, na.rm = TRUE),
-      Intensive = weighted.mean(TOT_VIAG, w = FE_PESS, na.rm = TRUE), .groups = "drop"
-    ) %>%
+    summarise(Extensive = weighted.mean(Y_Binary, w = FE_PESS, na.rm = TRUE),
+              Intensive = weighted.mean(TOT_VIAG, w = FE_PESS, na.rm = TRUE), .groups = "drop") %>%
     mutate(Grupo = ifelse(Treated == 1, paste("Treated", strata_name), paste("Control", strata_name)), Contexto = strata_name)
   
   plot_data <- bind_rows(full_trend, strata_trend)
   cores <- setNames(c(color_ctrl_full, color_trt_full, color_ctrl_strata, color_trt_strata),
                     c("Control (Full)", "Treated (Full)", paste("Control", strata_name), paste("Treated", strata_name)))
-  
   linhas <- setNames(c(linetype_full, linetype_strata), c("Baseline Global", strata_name))
   
   custom_theme <- theme_minimal(base_family = font_family) + 
-    theme(
-      legend.position = "bottom",
-      plot.title = element_text(face = "bold", size = 14),
-      axis.title = element_text(face = "bold", size = 12),
-      axis.text = element_text(size = 10),
-      legend.title = element_blank() 
-    )
+    theme(legend.position = "bottom",
+          plot.title = element_text(face = "bold", size = 14),
+          axis.title = element_text(face = "bold", size = 12),
+          axis.text = element_text(size = 10),
+          legend.title = element_blank())
   
   p_ext <- ggplot(plot_data, aes(x = Year, y = Extensive, color = Grupo, linetype = Contexto)) +
     geom_vline(xintercept = 2018, linetype = "dotted", color = "gray50", linewidth = 1) +
@@ -178,63 +209,65 @@ cat("::: panel-tabset\n\n")
 for (s in strata_keys) {
   cat(paste0("## ", s, "\n\n"))
   
-  # --- MAHALANOBIS SUB-TAB ---
-  cat("### Mahalanobis\n\n")
+  # Nested tabset for the different matching configurations
+  cat("::: panel-tabset\n\n")
   
-  p_pca_m <- gerar_pca(experiments[[s]]$mah$matched_data, paste(s, "(Mahalanobis)"), font_family = "NHG")
-  p_love_m <- love.plot(experiments[[s]]$mah$match_obj, binary = "std", continuous = "std", 
-                        abs = TRUE, thresholds = c(m = .1), title = paste("SMD -", s, "(Mah)")) + 
-              theme_minimal(base_family = "NHG")
-  
-  print(p_pca_m)
-  cat("\n\n")
-  print(p_love_m)
-  cat("\n\n")
-  
-  t_mah <- gerar_plots_tendencia(
-    strata_data = experiments[[s]]$mah$matched_data, 
-    strata_name = s, 
-    full_data = experiments$Full$mah$matched_data, 
-    font_family = "NHG"
+  # Define the configurations generated in 02_matching_did
+  configs <- list(
+    list(key = "mah_1", title = "Mahalanobis (1:1)", label = "Mahalanobis (1:1)"),
+    list(key = "mah_3", title = "Mahalanobis (1:3)", label = "Mahalanobis (1:3)"),
+    list(key = "log_1", title = "Logit (1:1)", label = "Logit (1:1)"),
+    list(key = "log_3", title = "Logit (1:3)", label = "Logit (1:3)"),
+    list(key = "cem", title = "CEM (Coarsened Exact)", label = "CEM")
   )
   
-  print(t_mah$ext)
-  cat("\n\n")
-  print(t_mah$int)
-  cat("\n\n")
-  
-  # --- LOGIT SUB-TAB ---
-  cat("### Logit (Propensity Score)\n\n")
-  
-  p_pca_l <- gerar_pca(experiments[[s]]$log$matched_data, paste(s, "(Logit)"), font_family = "NHG")
-  p_love_l <- love.plot(experiments[[s]]$log$match_obj, binary = "std", continuous = "std", 
-                        abs = TRUE, thresholds = c(m = .1), title = paste("SMD -", s, "(Logit)")) + 
+  for (conf in configs) {
+    cat(paste0("### ", conf$title, "\n\n"))
+    
+    # Extract the specific experiment data for this configuration
+    exp_data <- experiments[[s]][[conf$key]]
+    
+    # 1. Overlap Plot
+    # PSM uses "distance", MDM and CEM will use a continuous proxy like "RENDA_SM"
+    var_overlap <- ifelse(grepl("log", conf$key), "distance", "RENDA_SM")
+    p_dist <- gerar_dist_overlap(exp_data$match_obj, var_overlap, paste(s, conf$title), conf$label, font_family = "NHG")
+    print(p_dist)
+    cat("\n\n")
+    
+    # 2. Global Metrics Table
+    mets <- extrair_metricas_rubin_vr(exp_data$match_obj, exp_data$matched_data, conf$label)
+    cat(paste("**Max SMD:**", mets$Max_SMD, "| **Variance Ratios (Min/Max):**", mets$Min_Var_Ratio, "/", mets$Max_Var_Ratio, "\n\n"))
+    cat(paste("**Rubin's B:**", mets$Rubin_B, "(Target < 25) | **Rubin's R:**", mets$Rubin_R, "(Target 0.5 - 2.0)\n\n"))
+    
+    # 3. Rosenbaum Bounds (Sensitivity Analysis)
+    cat("**Rosenbaum Bounds (Intensive Margin):**\n\n")
+    bounds_res <- run_rosenbaum_bounds(exp_data$matched_data)
+    if (!is.null(bounds_res)) {
+      print(bounds_res)
+    } else {
+      cat("> *Note: Rosenbaum bounds calculation via Wilcoxon signed rank requires strict 1:1 paired data. Skipped for this ratio/method.*")
+    }
+    cat("\n\n")
+    
+    # 4. Love Plot
+    p_love <- love.plot(exp_data$match_obj, binary = "std", continuous = "std", 
+                        abs = TRUE, thresholds = c(m = .1), title = paste("SMD -", s, conf$title)) + 
               theme_minimal(base_family = "NHG")
+    print(p_love)
+    cat("\n\n")
+    
+    # 5. Trend Plots
+    t_plots <- gerar_plots_tendencia(exp_data$matched_data, s, experiments$Full[[conf$key]]$matched_data, font_family = "NHG")
+    print(t_plots$ext)
+    cat("\n\n")
+    print(t_plots$int)
+    cat("\n\n")
+  }
   
-  print(p_pca_l)
-  cat("\n\n")
-  print(p_love_l)
-  cat("\n\n")
-  
-  t_log <- gerar_plots_tendencia(
-    strata_data = experiments[[s]]$log$matched_data, 
-    strata_name = s, 
-    full_data = experiments$Full$log$matched_data, 
-    font_family = "NHG"
-  )
-  
-  print(t_log$ext)
-  cat("\n\n")
-  print(t_log$int)
-  cat("\n\n")
-  
-  p_ps <- gerar_ps_overlap(experiments[[s]]$log$match_obj, s, font_family = "NHG")
-  print(p_ps)
-  cat("\n\n")
+  cat(":::\n\n") # End nested method tabset
 }
 
-cat(":::\n\n")
-
+cat(":::\n\n") # End main strata tabset
 
 ```
 
@@ -321,17 +354,20 @@ print(p_coef_int)
 #| label: calculate-balance-metrics
 
 # Extract balance summary for a specific stratum to compare numerically
-# Example: S1_All
-bal_mah <- bal.tab(experiments$S1_All$mah$match_obj, un = FALSE)$Balance
-bal_log <- bal.tab(experiments$S1_All$log$match_obj, un = FALSE)$Balance
+# Example: S1_All (Using 1:1 Ratio)
+bal_mah <- bal.tab(experiments$Full$mah_1$match_obj, un = FALSE)$Balance
+bal_log <- bal.tab(experiments$Full$log_1$match_obj, un = FALSE)$Balance
+bal_cem <- bal.tab(experiments$Full$cem$match_obj, un = FALSE)$Balance
 
 mean_smd_mah <- mean(abs(bal_mah$Diff.Adj), na.rm = TRUE)
 mean_smd_log <- mean(abs(bal_log$Diff.Adj), na.rm = TRUE)
+mean_smd_cem <- mean(abs(bal_cem$Diff.Adj), na.rm = TRUE)
 
-cat("Mean Absolute SMD (S1_All)\n")
+
+cat("Mean Absolute SMD (Full - 1:1)\n")
 cat("Mahalanobis:", round(mean_smd_mah, 4), "\n")
 cat("Logit:      ", round(mean_smd_log, 4), "\n")
-
+cat("CEM:      ", round(mean_smd_log, 4), "\n")
 
 ```
 
@@ -341,57 +377,60 @@ cat("Logit:      ", round(mean_smd_log, 4), "\n")
 #| message: false
 #| warning: false
 
-# 1. Define all strata keys (Full + 9 splits)
+# 1. Define all strata keys
 strata_keys <- c("Full", "S1_All", "S1_Male", "S1_Female", 
                  "S2_All", "S2_Male", "S2_Female", 
                  "S3_All", "S3_Male", "S3_Female")
 
-# 2. Loop through and export all plots
+# 2. Define configurations to map
+configs <- list(
+  list(key = "mah_1", label = "Mahalanobis (1:1)"),
+  list(key = "mah_3", label = "Mahalanobis (1:3)"),
+  list(key = "log_1", label = "Logit (1:1)"),
+  list(key = "log_3", label = "Logit (1:3)"),
+  list(key = "cem", label = "CEM")
+)
+
+# 3. Loop through and export all plots
 for (s in strata_keys) {
-  
-  # A. Export Mahalanobis and Logit outputs
-  for (method in c("mah", "log")) {
-    method_label <- toupper(method)
+  for (conf in configs) {
     
-    # PCA
-    p_pca <- gerar_pca(experiments[[s]][[method]]$matched_data, 
-                       paste(s, method_label), font_family = "NHG")
-    ggsave(here("outputs", "figures", paste0("pca_overlap_", s, "_", method, ".png")), 
-           plot = p_pca, device = "png", width = 8, height = 6, bg = "white")
+    exp_data <- experiments[[s]][[conf$key]]
     
-    # Love Plot
-    p_love <- love.plot(experiments[[s]][[method]]$match_obj, binary = "std", continuous = "std", 
+    # A. Export Overlap Plots
+    var_overlap <- ifelse(grepl("log", conf$key), "distance", "RENDA_SM")
+    p_dist <- gerar_dist_overlap(exp_data$match_obj, var_overlap, paste(s, conf$label), conf$label, font_family = "NHG")
+    
+    ggsave(here("outputs", "figures", paste0("overlap_", s, "_", conf$key, ".png")), 
+           plot = p_dist, device = "png", width = 8, height = 6, bg = "white")
+    
+    # B. Export Love Plots
+    p_love <- love.plot(exp_data$match_obj, binary = "std", continuous = "std", 
                         abs = TRUE, thresholds = c(m = .1), 
-                        title = paste("Balanço SMD -", s, method_label)) + 
+                        title = paste("Balanço SMD -", s, conf$label)) + 
       theme_minimal(base_family = "NHG") +
       theme(plot.title = element_text(face = "bold"))
     
-    ggsave(here("outputs", "figures", paste0("love_plot_", s, "_", method, ".png")), 
+    ggsave(here("outputs", "figures", paste0("love_plot_", s, "_", conf$key, ".png")), 
            plot = p_love, device = "png", width = 8, height = 6, bg = "white")
     
-    # Trends (Extensive & Intensive) - FIX: Added full_data parameter here
+    # C. Export Trend Plots (Extensive & Intensive)
     p_trends <- gerar_plots_tendencia(
-      strata_data = experiments[[s]][[method]]$matched_data, 
+      strata_data = exp_data$matched_data, 
       strata_name = s, 
-      full_data = experiments$Full[[method]]$matched_data,
+      full_data = experiments$Full[[conf$key]]$matched_data,
       font_family = "NHG"
     )
     
-    ggsave(here("outputs", "figures", paste0("trend_extensive_", s, "_", method, ".png")), 
+    ggsave(here("outputs", "figures", paste0("trend_extensive_", s, "_", conf$key, ".png")), 
            plot = p_trends$ext, device = "png", width = 8, height = 5, bg = "white")
     
-    ggsave(here("outputs", "figures", paste0("trend_intensive_", s, "_", method, ".png")), 
+    ggsave(here("outputs", "figures", paste0("trend_intensive_", s, "_", conf$key, ".png")), 
            plot = p_trends$int, device = "png", width = 8, height = 5, bg = "white")
   }
-  
-  # B. Export P-Score Overlap (Only applies to Logit)
-  p_ps <- gerar_ps_overlap(experiments[[s]]$log$match_obj, s, font_family = "NHG")
-  ggsave(here("outputs", "figures", paste0("pscore_overlap_", s, ".png")), 
-         plot = p_ps, device = "png", width = 8, height = 6, bg = "white")
 }
 
 write_csv(master_table, here("outputs", "tables", "master_sample_table-9s.csv"))
-message("(EN) All Vector Plots (.png) for Mahalanobis and Logit methods were exported to 'outputs/'!")
-
+message("(EN) All Vector Plots (.png) for the matching methods were exported to 'outputs/'!")
 
 ```
