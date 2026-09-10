@@ -53,7 +53,7 @@ linha_jade <- st_read(ljade, query = "SELECT * FROM \"SIRGAS_GPKG_linhatrem\" WH
 
 # Treatment definition
 is_treated <- lengths(st_intersects(od07z, linha_jade)) > 0
-treatment_table <- data.frame(ZONA = od07z$Zona07, Treated = as.numeric(is_treated))
+treatment_table <- data.frame(ZONA = od07z$Zona07, Treated = as.numeric(is_treated)) 
 valid_zones_07 <- treatment_table$ZONA
 
 # --- 3. HARMONIZATION & PANEL STACKING ---
@@ -194,18 +194,18 @@ panel_base <- panel_base %>%
     )
   )
 
-# Check N sizes for the 6 new strata before matching
+# Check N sizes for the 9 new strata before matching
 diagnostic_count <- panel_base %>%
   filter(sexo_harm %in% c("Male", "Female")) %>%
   group_by(Income_Group, sexo_harm, Treated) %>%
   summarise(N = n(), .groups = "drop") %>%
   pivot_wider(names_from = Treated, values_from = N, names_prefix = "Treated_")
 
-print("--- RAW OBSERVATION COUNTS FOR 6 STRATA ---")
+print("--- RAW OBSERVATION COUNTS FOR STRATA ---")
 print(diagnostic_count)
 
-# Save Processed Base
+# Save Processed Base (Updated to 9s)
 dir.create(here("data", "processed"), showWarnings = FALSE)
-saveRDS(panel_base, here("data", "processed", "01_panel_base_6s.rds"))
+saveRDS(panel_base, here("data", "processed", "01_panel_base_9s.rds"))
 
 ```

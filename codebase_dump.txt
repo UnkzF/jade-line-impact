@@ -1,0 +1,1522 @@
+================================================================================
+File: D:/jade-line-impact/jade-line-impact/analysis/01_setup-g_stratified.qmd
+================================================================================
+```
+---
+title: "01 - Setup, Harmonization and CART Stratification - gender strata"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: setup-and-harmonization
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(sf)
+library(tmap)
+library(data.table)
+library(rpart)
+library(rpart.plot)
+library(here)
+library(showtext)
+
+# Load custom helper functions
+source(here("R", "spatial_helpers.R"))
+
+# --- 1. FILE PATHS ---
+# Shapes
+od07fps <- here("data", "raw", "od2007", "Zonas2007_region.shp")
+od97fps <- here("data", "raw", "od1997", "Zonas1997_region.shp")
+od17fps <- here("data", "raw", "od2017", "Zonas_2017_region.shp")
+od23fps <- here("data", "raw", "od2023", "Zonas_2023.shp")
+
+# Data Tables
+od07fp <- here("data", "raw", "od2007", "OD_2007_v2d.dbf")
+od97fp <- here("data", "raw", "od1997", "OD97Zona.dbf")
+od17fp <- here("data", "raw", "od2017", "OD_2017_v1.dbf")
+od23fp <- here("data", "raw", "od2023", "Banco2023_divulgacao_190225.dbf")
+
+# Treatment Shape
+ljade <- here("data", "raw", "outros", "SIRGAS_GPKG_linhatrem.gpkg")
+
+# --- 2. READ SPATIAL & TABULAR DATA ---
+od07z <- st_read(od07fps, quiet = TRUE) %>% st_transform(31983)
+od97z <- st_read(od97fps, quiet = TRUE) %>% st_transform(31983)
+od17z <- st_read(od17fps, quiet = TRUE) %>% st_transform(31983)
+od23z <- st_read(od23fps, quiet = TRUE) %>% st_transform(31983)
+
+od07 <- st_read(od07fp, geometry = FALSE, quiet = TRUE)
+od97 <- st_read(od97fp, geometry = FALSE, quiet = TRUE)
+od17 <- st_read(od17fp, geometry = FALSE, quiet = TRUE)
+od23 <- st_read(od23fp, geometry = FALSE, quiet = TRUE)
+
+linha_jade <- st_read(ljade, query = "SELECT * FROM \"SIRGAS_GPKG_linhatrem\" WHERE ltr_nome = 'JADE'", quiet = TRUE) %>%
+  st_transform(31983)
+
+# Treatment definition
+is_treated <- lengths(st_intersects(od07z, linha_jade)) > 0
+treatment_table <- data.frame(ZONA = od07z$Zona07, Treated = as.numeric(is_treated)) 
+valid_zones_07 <- treatment_table$ZONA
+
+# --- 3. HARMONIZATION & PANEL STACKING ---
+SM_2023 <- 1550.00
+SM_2017 <- 1094.00
+SM_2007 <- 490.00
+SM_1997 <- 120.00
+
+clean_currency <- function(x) {
+  if(is.numeric(x)) return(x)
+  as.numeric(str_replace(as.character(x), ",", "."))
+}
+
+get_target_zones <- function(key_df, valid_list, col_orig, col_dest) {
+  key_df %>%
+    filter(!!sym(col_dest) %in% valid_list) %>%
+    group_by(!!sym(col_orig)) %>%
+    filter(weight == max(weight)) %>% slice(1) %>% ungroup() %>%
+    select(!!sym(col_orig), !!sym(col_dest))
+}
+
+key_23_07 <- generate_weights(od23z, od07z, "NumeroZona", "Zona07", 2023, 2007)
+key_17_07 <- generate_weights(od17z, od07z, "NumeroZona", "Zona07", 2017, 2007)
+key_97_07 <- generate_weights(od97z, od07z, "Zona97", "Zona07", 1997, 2007)
+
+map_23 <- get_target_zones(key_23_07, valid_zones_07, "Z_2023", "Z_2007")
+map_17 <- get_target_zones(key_17_07, valid_zones_07, "Z_2017", "Z_2007")
+map_97 <- get_target_zones(key_97_07, valid_zones_07, "Z_1997", "Z_2007")
+
+p23 <- od23 %>% 
+  filter(ZONA %in% map_23$Z_2023, F_PESS == 1) %>%
+  left_join(map_23, by = c("ZONA" = "Z_2023")) %>%
+  mutate(Year = 2023, 
+         ZONA_07 = Z_2007, 
+         RENDA_SM = clean_currency(VL_REN_I) / SM_2023,
+         FE_PESS = clean_currency(FE_PESS),
+         TOT_VIAG = clean_currency(TOT_VIAG),
+         QT_AUTO = as.numeric(QT_AUTO),
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG, 
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+p17 <- od17 %>%
+  filter(ZONA %in% map_17$Z_2017, F_PESS == 1) %>%
+  left_join(map_17, by = c("ZONA" = "Z_2017")) %>%
+  mutate(Year = 2017,
+         ZONA_07 = Z_2007,
+         RENDA_SM = clean_currency(VL_REN_I) / SM_2017,
+         FE_PESS = clean_currency(FE_PESS),
+         TOT_VIAG = clean_currency(TOT_VIAG),
+         QT_AUTO = as.numeric(QT_AUTO),
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG,
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+p07 <- od07 %>% 
+  filter(ZONA %in% valid_zones_07, F_PESS == 1) %>%
+  mutate(Year = 2007, 
+         ZONA_07 = ZONA, 
+         RENDA_SM = clean_currency(VL_REN_I) / SM_2007,
+         FE_PESS = clean_currency(FE_PESS), 
+         TOT_VIAG = clean_currency(TOT_VIAG),
+         QT_AUTO = as.numeric(QT_AUTO), 
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG, 
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+p97 <- od97 %>% 
+  filter(ZONA %in% map_97$Z_1997) %>%
+  group_by(ID_PESS) %>% 
+  mutate(TOT_VIAG = sum(!is.na(clean_currency(FE_VIA)) & clean_currency(FE_VIA) > 0)) %>% 
+  ungroup() %>%
+  filter(F_PESS == 1) %>% 
+  left_join(map_97, by = c("ZONA" = "Z_1997")) %>%
+  mutate(Year = 1997, 
+         ZONA_07 = Z_2007, 
+         RENDA_SM = clean_currency(VL_REN_I) / SM_1997,
+         FE_PESS = clean_currency(FE_PESS), 
+         TOT_VIAG = TOT_VIAG,
+         QT_AUTO = as.numeric(QT_AUTO), 
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG, 
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+raw_panel <- bind_rows(p97, p07, p17, p23) %>%
+  left_join(treatment_table, by = c("ZONA_07" = "ZONA")) %>% filter(!is.na(Treated))
+
+final_panel_4waves <- raw_panel %>%
+  mutate(
+    sexo_harm = case_when(SEXO == 1 ~ "Male", SEXO == 2 ~ "Female", TRUE ~ "Other"),
+    has_car = ifelse(QT_AUTO > 0, 1, 0),
+    educ_harm = case_when(
+      Year == 1997 & GRAU_INS %in% c(1,2,3) ~ "Primary_Incomplete",
+      Year == 1997 & GRAU_INS == 4 ~ "Primary_Complete",
+      Year == 1997 & GRAU_INS == 5 ~ "Secondary_Incomplete",
+      Year == 1997 & GRAU_INS %in% c(6,7) ~ "Secondary_Complete",
+      Year == 1997 & GRAU_INS == 8 ~ "Higher_Ed_Complete",
+      Year >= 2007 & GRAU_INS == 1 ~ "Primary_Incomplete",
+      Year >= 2007 & GRAU_INS == 2 ~ "Primary_Complete",
+      Year >= 2007 & GRAU_INS == 3 ~ "Secondary_Incomplete",
+      Year >= 2007 & GRAU_INS == 4 ~ "Secondary_Complete",
+      Year >= 2007 & GRAU_INS == 5 ~ "Higher_Ed_Complete",
+      TRUE ~ "Other"
+    ),
+    activity_harm = case_when(
+      CD_ATIVI == 1 ~ "Worker",
+      CD_ATIVI == 4 & Year == 1997 ~ "Unemployed",
+      CD_ATIVI == 5 & Year >= 2007 ~ "Unemployed",
+      CD_ATIVI == 8 ~ "Student",
+      CD_ATIVI == 5 & Year == 1997 ~ "Retired",
+      CD_ATIVI == 4 & Year >= 2007 ~ "Retired",
+      TRUE ~ "Other"
+    ),
+    age_group = case_when(
+      IDADE < 18 ~ "Child", IDADE >= 18 & IDADE < 30 ~ "Youth",
+      IDADE >= 30 & IDADE < 60 ~ "Adult", IDADE >= 60 ~ "Senior"
+    )
+  )
+
+panel_base <- final_panel_4waves %>% na.omit()
+
+# --- 4. CART STRATIFICATION ---
+set.seed(123)
+income_tree <- rpart(TOT_VIAG ~ RENDA_SM, 
+                     data = panel_base, method = "anova", 
+                     control = rpart.control(cp = 0.001, maxdepth = 3))
+rpart.plot(income_tree, main = "Cortes Ótimos de Renda (Volume de Viagens)", 
+           type = 4, extra = 101, box.palette = "Greens")
+
+# --- 5. DIAGNOSTIC STRATA COUNT ---
+# Assign universal income groups based on CART cuts
+panel_base <- panel_base %>%
+  mutate(
+    Income_Group = case_when(
+      RENDA_SM < 0.77 ~ "S1 (< 0.77 SM)",
+      RENDA_SM >= 0.77 & RENDA_SM < 2.01 ~ "S2 (0.77 - 2.01 SM)",
+      RENDA_SM >= 2.01 ~ "S3 (> 2.01 SM)"
+    )
+  )
+
+# Check N sizes for the 9 new strata before matching
+diagnostic_count <- panel_base %>%
+  filter(sexo_harm %in% c("Male", "Female")) %>%
+  group_by(Income_Group, sexo_harm, Treated) %>%
+  summarise(N = n(), .groups = "drop") %>%
+  pivot_wider(names_from = Treated, values_from = N, names_prefix = "Treated_")
+
+print("--- RAW OBSERVATION COUNTS FOR STRATA ---")
+print(diagnostic_count)
+
+# Save Processed Base (Updated to 9s)
+dir.create(here("data", "processed"), showWarnings = FALSE)
+saveRDS(panel_base, here("data", "processed", "01_panel_base_9s.rds"))
+
+```
+```
+
+================================================================================
+File: D:/jade-line-impact/jade-line-impact/analysis/01_setup.qmd
+================================================================================
+```
+---
+title: "01 - Setup, Harmonization and CART Stratification"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: setup-and-harmonization
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(sf)
+library(tmap)
+library(data.table)
+library(rpart)
+library(rpart.plot)
+library(here)
+library(showtext)
+
+# Load custom helper functions
+source(here("R", "spatial_helpers.R"))
+
+# --- 1. FILE PATHS ---
+# Shapes
+od07fps <- here("data", "raw", "od2007", "Zonas2007_region.shp")
+od97fps <- here("data", "raw", "od1997", "Zonas1997_region.shp")
+od17fps <- here("data", "raw", "od2017", "Zonas_2017_region.shp")
+od23fps <- here("data", "raw", "od2023", "Zonas_2023.shp")
+
+# Data Tables
+od07fp <- here("data", "raw", "od2007", "OD_2007_v2d.dbf")
+od97fp <- here("data", "raw", "od1997", "OD97Zona.dbf")
+od17fp <- here("data", "raw", "od2017", "OD_2017_v1.dbf")
+od23fp <- here("data", "raw", "od2023", "Banco2023_divulgacao_190225.dbf")
+
+# Treatment Shape
+ljade <- here("data", "raw", "outros", "SIRGAS_GPKG_linhatrem.gpkg")
+
+# --- 2. READ SPATIAL & TABULAR DATA ---
+od07z <- st_read(od07fps, quiet = TRUE) %>% st_transform(31983)
+od97z <- st_read(od97fps, quiet = TRUE) %>% st_transform(31983)
+od17z <- st_read(od17fps, quiet = TRUE) %>% st_transform(31983)
+od23z <- st_read(od23fps, quiet = TRUE) %>% st_transform(31983)
+
+od07 <- st_read(od07fp, geometry = FALSE, quiet = TRUE)
+od97 <- st_read(od97fp, geometry = FALSE, quiet = TRUE)
+od17 <- st_read(od17fp, geometry = FALSE, quiet = TRUE)
+od23 <- st_read(od23fp, geometry = FALSE, quiet = TRUE)
+
+linha_jade <- st_read(ljade, query = "SELECT * FROM \"SIRGAS_GPKG_linhatrem\" WHERE ltr_nome = 'JADE'", quiet = TRUE) %>%
+  st_transform(31983)
+
+# Treatment definition
+is_treated <- lengths(st_intersects(od07z, linha_jade)) > 0
+treatment_table <- data.frame(ZONA = od07z$Zona07, Treated = as.numeric(is_treated))
+valid_zones_07 <- treatment_table$ZONA
+
+# --- 3. HARMONIZATION & PANEL STACKING ---
+SM_2023 <- 1550.00
+SM_2017 <- 1094.00
+SM_2007 <- 490.00
+SM_1997 <- 120.00
+
+clean_currency <- function(x) {
+  if(is.numeric(x)) return(x)
+  as.numeric(str_replace(as.character(x), ",", "."))
+}
+
+get_target_zones <- function(key_df, valid_list, col_orig, col_dest) {
+  key_df %>%
+    filter(!!sym(col_dest) %in% valid_list) %>%
+    group_by(!!sym(col_orig)) %>%
+    filter(weight == max(weight)) %>% slice(1) %>% ungroup() %>%
+    select(!!sym(col_orig), !!sym(col_dest))
+}
+
+key_23_07 <- generate_weights(od23z, od07z, "NumeroZona", "Zona07", 2023, 2007)
+key_17_07 <- generate_weights(od17z, od07z, "NumeroZona", "Zona07", 2017, 2007)
+key_97_07 <- generate_weights(od97z, od07z, "Zona97", "Zona07", 1997, 2007)
+
+map_23 <- get_target_zones(key_23_07, valid_zones_07, "Z_2023", "Z_2007")
+map_17 <- get_target_zones(key_17_07, valid_zones_07, "Z_2017", "Z_2007")
+map_97 <- get_target_zones(key_97_07, valid_zones_07, "Z_1997", "Z_2007")
+
+p23 <- od23 %>% 
+  filter(ZONA %in% map_23$Z_2023, F_PESS == 1) %>%
+  left_join(map_23, by = c("ZONA" = "Z_2023")) %>%
+  mutate(Year = 2023, 
+         ZONA_07 = Z_2007, 
+         RENDA_SM = clean_currency(VL_REN_I) / SM_2023,
+         FE_PESS = clean_currency(FE_PESS),
+         TOT_VIAG = clean_currency(TOT_VIAG),
+         QT_AUTO = as.numeric(QT_AUTO),
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG, 
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+p17 <- od17 %>%
+  filter(ZONA %in% map_17$Z_2017, F_PESS == 1) %>%
+  left_join(map_17, by = c("ZONA" = "Z_2017")) %>%
+  mutate(Year = 2017,
+         ZONA_07 = Z_2007,
+         RENDA_SM = clean_currency(VL_REN_I) / SM_2017,
+         FE_PESS = clean_currency(FE_PESS),
+         TOT_VIAG = clean_currency(TOT_VIAG),
+         QT_AUTO = as.numeric(QT_AUTO),
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG,
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+p07 <- od07 %>% 
+  filter(ZONA %in% valid_zones_07, F_PESS == 1) %>%
+  mutate(Year = 2007, 
+         ZONA_07 = ZONA, 
+         RENDA_SM = clean_currency(VL_REN_I) / SM_2007,
+         FE_PESS = clean_currency(FE_PESS), 
+         TOT_VIAG = clean_currency(TOT_VIAG),
+         QT_AUTO = as.numeric(QT_AUTO), 
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG, 
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+p97 <- od97 %>% 
+  filter(ZONA %in% map_97$Z_1997) %>%
+  group_by(ID_PESS) %>% 
+  mutate(TOT_VIAG = sum(!is.na(clean_currency(FE_VIA)) & clean_currency(FE_VIA) > 0)) %>% 
+  ungroup() %>%
+  filter(F_PESS == 1) %>% 
+  left_join(map_97, by = c("ZONA" = "Z_1997")) %>%
+  mutate(Year = 1997, 
+         ZONA_07 = Z_2007, 
+         RENDA_SM = clean_currency(VL_REN_I) / SM_1997,
+         FE_PESS = clean_currency(FE_PESS), 
+         TOT_VIAG = TOT_VIAG,
+         QT_AUTO = as.numeric(QT_AUTO), 
+         ID_PESS = as.character(ID_PESS)) %>%
+  select(ID_PESS, ZONA_07, Year, RENDA_SM, FE_PESS, TOT_VIAG, 
+         IDADE, SEXO, GRAU_INS, CD_ATIVI, QT_AUTO)
+
+raw_panel <- bind_rows(p97, p07, p17, p23) %>%
+  left_join(treatment_table, by = c("ZONA_07" = "ZONA")) %>% filter(!is.na(Treated))
+
+final_panel_4waves <- raw_panel %>%
+  mutate(
+    sexo_harm = case_when(SEXO == 1 ~ "Male", SEXO == 2 ~ "Female", TRUE ~ "Other"),
+    has_car = ifelse(QT_AUTO > 0, 1, 0),
+    educ_harm = case_when(
+      Year == 1997 & GRAU_INS %in% c(1,2,3) ~ "Primary_Incomplete",
+      Year == 1997 & GRAU_INS == 4 ~ "Primary_Complete",
+      Year == 1997 & GRAU_INS == 5 ~ "Secondary_Incomplete",
+      Year == 1997 & GRAU_INS %in% c(6,7) ~ "Secondary_Complete",
+      Year == 1997 & GRAU_INS == 8 ~ "Higher_Ed_Complete",
+      Year >= 2007 & GRAU_INS == 1 ~ "Primary_Incomplete",
+      Year >= 2007 & GRAU_INS == 2 ~ "Primary_Complete",
+      Year >= 2007 & GRAU_INS == 3 ~ "Secondary_Incomplete",
+      Year >= 2007 & GRAU_INS == 4 ~ "Secondary_Complete",
+      Year >= 2007 & GRAU_INS == 5 ~ "Higher_Ed_Complete",
+      TRUE ~ "Other"
+    ),
+    activity_harm = case_when(
+      CD_ATIVI == 1 ~ "Worker",
+      CD_ATIVI == 4 & Year == 1997 ~ "Unemployed",
+      CD_ATIVI == 5 & Year >= 2007 ~ "Unemployed",
+      CD_ATIVI == 8 ~ "Student",
+      CD_ATIVI == 5 & Year == 1997 ~ "Retired",
+      CD_ATIVI == 4 & Year >= 2007 ~ "Retired",
+      TRUE ~ "Other"
+    ),
+    age_group = case_when(
+      IDADE < 18 ~ "Child", IDADE >= 18 & IDADE < 30 ~ "Youth",
+      IDADE >= 30 & IDADE < 60 ~ "Adult", IDADE >= 60 ~ "Senior"
+    )
+  )
+
+panel_base <- final_panel_4waves %>% na.omit()
+
+# --- 4. CART STRATIFICATION ---
+set.seed(123)
+income_tree <- rpart(TOT_VIAG ~ RENDA_SM, 
+                     data = panel_base, method = "anova", 
+                     control = rpart.control(cp = 0.001, maxdepth = 3))
+rpart.plot(income_tree, main = "Cortes Ótimos de Renda (Volume de Viagens)", 
+           type = 4, extra = 101, box.palette = "Greens")
+
+# Save Processed Base
+dir.create(here("data", "processed"), showWarnings = FALSE)
+saveRDS(panel_base, here("data", "processed", "01_panel_base_clean.rds"))
+
+```
+```
+
+================================================================================
+File: D:/jade-line-impact/jade-line-impact/analysis/02_matching_did-g_stratified.qmd
+================================================================================
+```
+---
+title: "02 - Matching, DiD and Triple Difference"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: matching-and-models
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(MatchIt)
+library(broom)
+library(lmtest)
+library(sandwich)
+library(purrr)
+library(here)
+
+panel_base <- readRDS(here("data", "processed", "01_panel_base_9s.rds"))
+
+run_strata_experiment <- function(min_sm, max_sm, target_gender, strata_name, data) {
+  
+  df_filtered <- data %>% filter(RENDA_SM >= min_sm & RENDA_SM < max_sm)
+  
+  # Dynamic Formulas based on Gender Stratification
+  if (target_gender != "All") {
+    # For the specific gender slices: Pre-filter the data. exact = ~Year is enough.
+    df_filtered <- df_filtered %>% filter(sexo_harm == target_gender)
+    
+    form_match <- Treated ~ educ_harm + activity_harm + has_car + age_group + RENDA_SM
+    form_exact <- ~ Year
+    
+    # Regression formulas without sexo_harm
+    form_did_ext <- Y_Binary ~ Treated * Year_Factor + educ_harm + activity_harm + has_car + age_group
+    form_did_int <- TOT_VIAG ~ Treated * Year_Factor + educ_harm + activity_harm + has_car + age_group
+    
+  } else {
+    # For the Global Baseline and Income-Only Strata: Force exact matching on both Year AND Gender
+    form_match <- Treated ~ educ_harm + activity_harm + has_car + age_group + RENDA_SM
+    form_exact <- ~ Year + sexo_harm
+    
+    # Regression formulas with sexo_harm
+    form_did_ext <- Y_Binary ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group
+    form_did_int <- TOT_VIAG ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group
+  }
+  
+  match_obj <- matchit(
+    formula = form_match,
+    data = df_filtered, method = "nearest", distance = "mahalanobis",
+    exact = form_exact, 
+    ratio = 3, replace = FALSE 
+  )
+  
+  matched_data <- match.data(match_obj) %>% mutate(Strata = strata_name)
+  
+  did_df <- matched_data %>%
+    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0), Year_Factor = relevel(factor(Year), ref = "2017"))
+  
+  # Extensive Margin
+  model_ext <- lm(form_did_ext, data = did_df, weights = FE_PESS)
+  res_ext <- tidy(coeftest(model_ext, vcov = vcovCL(model_ext, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+  
+  # Intensive Margin
+  model_int <- lm(form_did_int, data = did_df, weights = FE_PESS)
+  res_int <- tidy(coeftest(model_int, vcov = vcovCL(model_int, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+  
+  n_pre <- df_filtered %>% group_by(Year, Treated) %>% summarise(N_Pre = n(), .groups = "drop")
+  n_post <- matched_data %>% group_by(Year, Treated) %>% summarise(N_Post = n(), .groups = "drop")
+  
+  sample_table <- n_pre %>%
+    left_join(n_post, by = c("Year", "Treated")) %>%
+    mutate(Grupo = ifelse(Treated == 1, "Tratado", "Controle")) %>% select(-Treated) %>%
+    pivot_wider(names_from = Grupo, values_from = c(N_Pre, N_Post), values_fill = 0) %>%
+    mutate(
+      Strata = strata_name,
+      DiD_Ext_Estimate = round(res_ext$estimate, 4), DiD_Ext_PValue = round(res_ext$p.value, 4),
+      DiD_Int_Estimate = round(res_int$estimate, 4), DiD_Int_PValue = round(res_int$p.value, 4)
+    ) %>%
+    select(Strata, Year, N_Pre_Controle, N_Pre_Tratado, N_Post_Controle, N_Post_Tratado, 
+           DiD_Ext_Estimate, DiD_Ext_PValue, DiD_Int_Estimate, DiD_Int_PValue)
+
+  return(list(sample_table = sample_table, matched_data = matched_data, match_obj = match_obj))
+}
+
+# The 9 New Strata Definitions (plus the global baseline)
+strata_defs <- list(
+  list(0, Inf, "All", "Full Panel (Global)"),
+  list(0, 0.77, "All", "S1_All"),
+  list(0.77, 2.01, "All", "S2_All"),
+  list(2.01, Inf, "All", "S3_All"),
+  list(0, 0.77, "Male", "S1_Male"),
+  list(0, 0.77, "Female", "S1_Female"),
+  list(0.77, 2.01, "Male", "S2_Male"),
+  list(0.77, 2.01, "Female", "S2_Female"),
+  list(2.01, Inf, "Male", "S3_Male"),
+  list(2.01, Inf, "Female", "S3_Female")
+)
+
+experiments <- map(strata_defs, ~run_strata_experiment(.x[[1]], .x[[2]], .x[[3]], .x[[4]], panel_base))
+names(experiments) <- c("Full", "S1_All", "S2_All", "S3_All", "S1_Male", "S1_Female", "S2_Male", "S2_Female", "S3_Male", "S3_Female")
+
+master_sample_table <- map_dfr(experiments, "sample_table")
+master_matched_data <- map_dfr(experiments[-1], "matched_data")
+
+# Triple Difference (DDD) - Intensive Margin
+master_matched_data$Year_Factor <- relevel(factor(master_matched_data$Year), ref = "2017")
+mod_ddd_int <- lm(
+  TOT_VIAG ~ Treated * Year_Factor * factor(Strata) + 
+    sexo_harm + educ_harm + activity_harm + has_car + age_group, 
+  data = master_matched_data, weights = FE_PESS
+)
+res_ddd_int <- coeftest(mod_ddd_int, vcov = vcovCL(mod_ddd_int, cluster = ~ZONA_07))
+
+# --- EXPORT ARTIFACTS ---
+saveRDS(master_sample_table, here("data", "processed", "02_master_sample_table-9s.rds"))
+saveRDS(master_matched_data, here("data", "processed", "02_master_matched_data-9s.rds"))
+saveRDS(experiments, here("data", "processed", "02_experiments_results-9s.rds"))
+saveRDS(res_ddd_int, here("data", "processed", "02_triple_diff_results-9s.rds"))
+```
+
+
+```{r contraexperimento-did}
+#| label: contraexperimento did
+#| cache: true
+#| eval: false
+
+panel_base <- readRDS(here("data", "processed", "01_panel_base_clean.rds"))
+
+
+# 1. Prepare the CS-DiD variables
+did_df_cs <- panel_base %>%
+  mutate(
+    ID_PESS = as.numeric(ID_PESS),
+    Y_Binary = ifelse(TOT_VIAG > 0, 1, 0),
+    # Create the Group variable: 2018 for treated zones, 0 for control zones
+    first_treat_year = ifelse(Treated == 1, 2018, 0),
+  )
+
+# 2. Run the CS-DiD Estimator
+did_contra <- att_gt(
+  yname = "TOT_VIAG", # Swap to "TOT_VIAG" to test the Intensive Margin
+  tname =  "Year",
+  #idname = "ID_PESS", 
+  gname = "first_treat_year", 
+  xformla = ~ 1,
+  data = did_df_cs,
+  panel = FALSE, # CRITICAL: Tells the package this is a repeated cross-section
+  allow_unbalanced_panel = TRUE, 
+  weightsname = "FE_PESS",
+  control_group = "nevertreated", # Explicitly defines the 0 group as the control
+  bstrap = TRUE, # Enables wild bootstrap for robust standard errors
+  cband = TRUE   # Computes simultaneous confidence bands
+)
+
+# 3. View the baseline Group-Time Average Treatment Effects
+summary(did_contra)
+
+# 4. Aggregate into an Event Study (Dynamic Effects)
+es_contra <- aggte(did_contra, type = "dynamic")
+summary(es_contra)
+ggdid(did_contra)
+ggdid(es_contra)
+
+```
+```
+
+================================================================================
+File: D:/jade-line-impact/jade-line-impact/analysis/02_matching_did.qmd
+================================================================================
+```
+---
+title: "02 - Matching, DiD and Triple Difference"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: matching-and-models
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(MatchIt)
+library(broom)
+library(lmtest)
+library(sandwich)
+library(purrr)
+
+panel_base <- readRDS(here("data", "processed", "01_panel_base_clean.rds"))
+
+run_strata_experiment <- function(min_sm, max_sm, strata_name, data) {
+  
+  df_filtered <- data %>% filter(RENDA_SM >= min_sm & RENDA_SM < max_sm)
+  
+  match_obj <- matchit(
+    formula = Treated ~ sexo_harm + educ_harm + activity_harm + has_car + age_group + RENDA_SM,
+    data = df_filtered, method = "nearest", distance = "mahalanobis",
+    exact = ~ Year, ratio = 3, replace = FALSE 
+  )
+  
+  matched_data <- match.data(match_obj) %>% mutate(Strata = strata_name)
+  
+  did_df <- matched_data %>%
+    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0), Year_Factor = relevel(factor(Year), ref = "2017"))
+  
+  # Extensive Margin
+  model_ext <- lm(Y_Binary ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group, 
+                  data = did_df, weights = FE_PESS)
+  res_ext <- tidy(coeftest(model_ext, vcov = vcovCL(model_ext, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+  
+  # Intensive Margin
+  model_int <- lm(TOT_VIAG ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group, 
+                  data = did_df, weights = FE_PESS)
+  res_int <- tidy(coeftest(model_int, vcov = vcovCL(model_int, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+  
+  n_pre <- df_filtered %>% group_by(Year, Treated) %>% summarise(N_Pre = n(), .groups = "drop")
+  n_post <- matched_data %>% group_by(Year, Treated) %>% summarise(N_Post = n(), .groups = "drop")
+  
+  sample_table <- n_pre %>%
+    left_join(n_post, by = c("Year", "Treated")) %>%
+    mutate(Grupo = ifelse(Treated == 1, "Tratado", "Controle")) %>% select(-Treated) %>%
+    pivot_wider(names_from = Grupo, values_from = c(N_Pre, N_Post), values_fill = 0) %>%
+    mutate(
+      Strata = strata_name,
+      DiD_Ext_Estimate = round(res_ext$estimate, 4), DiD_Ext_PValue = round(res_ext$p.value, 4),
+      DiD_Int_Estimate = round(res_int$estimate, 4), DiD_Int_PValue = round(res_int$p.value, 4)
+    ) %>%
+    select(Strata, Year, N_Pre_Controle, N_Pre_Tratado, N_Post_Controle, N_Post_Tratado, 
+           DiD_Ext_Estimate, DiD_Ext_PValue, DiD_Int_Estimate, DiD_Int_PValue)
+
+  return(list(sample_table = sample_table, matched_data = matched_data, match_obj = match_obj))
+}
+
+# Scenarios based on CART optimal breaks (merged S3/S4)
+strata_defs <- list(
+  list(0, Inf, "Full Panel (Global)"),
+  list(0, 0.77, "S1: 0 a 0.77 SM"),
+  list(0.77, 2.01, "S2: 0.77 a 2.01 SM"),
+  list(2.01, Inf, "S3: > 2.01 SM")
+)
+
+experiments <- map(strata_defs, ~run_strata_experiment(.x[[1]], .x[[2]], .x[[3]], panel_base))
+names(experiments) <- c("Full", "S1", "S2", "S3")
+
+master_sample_table <- map_dfr(experiments, "sample_table")
+master_matched_data <- map_dfr(experiments[-1], "matched_data")
+
+# Triple Difference (DDD) - Intensive Margin
+master_matched_data$Year_Factor <- relevel(factor(master_matched_data$Year), ref = "2017")
+mod_ddd_int <- lm(
+  TOT_VIAG ~ Treated * Year_Factor * factor(Strata) + 
+    sexo_harm + educ_harm + activity_harm + has_car + age_group, 
+  data = master_matched_data, weights = FE_PESS
+)
+res_ddd_int <- coeftest(mod_ddd_int, vcov = vcovCL(mod_ddd_int, cluster = ~ZONA_07))
+
+# --- EXPORT ARTIFACTS ---
+saveRDS(master_sample_table, here("data", "processed", "02_master_sample_table.rds"))
+saveRDS(master_matched_data, here("data", "processed", "02_master_matched_data.rds"))
+saveRDS(experiments, here("data", "processed", "02_experiments_results.rds"))
+saveRDS(res_ddd_int, here("data", "processed", "02_triple_diff_results.rds"))
+
+```
+```
+
+================================================================================
+File: D:/jade-line-impact/jade-line-impact/analysis/03_diagnostics-g_stratified.qmd
+================================================================================
+```
+---
+title: "03 - Diagnostics and Visualizations"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: setup-fonts
+#| message: false
+
+library(showtext)
+library(svglite)
+
+# Map the two existing files. 
+font_add(
+  family = "NHG", 
+  regular = "C:/WINDOWS/FONTS/NHAASGROTESKTXPRO-RG.TTF",
+  italic  = "C:/WINDOWS/FONTS/NHAASGROTESKTXPRO-IT.TTF"
+)
+
+# Tell R to automatically use showtext for rendering graphics
+showtext_auto()
+
+```
+
+```{r}
+#| label: load-artifacts
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(cobalt)
+library(ggplot2)
+library(here)
+
+experiments <- readRDS(here("data", "processed", "02_experiments_results-9s.rds"))
+master_table <- readRDS(here("data", "processed", "02_master_sample_table-9s.rds"))
+```
+
+## Master Sample Table & Causal Estimates
+
+```{r}
+#| label: tbl-master
+
+knitr::kable(master_table, caption = "Sample Size & DiD Estimates per Stratum")
+```
+
+## Common Support (PCA) and Balance (Love Plots)
+
+```{r}
+#| label: diagnostic-functions
+
+gerar_pca <- function(matched_data, strata_name, 
+                      font_family = "sans", 
+                      color_ctrl = "#999999", 
+                      color_trt = "#E69F00") {
+  
+  covariates <- matched_data %>%
+    select(sexo_harm, educ_harm, activity_harm, has_car, age_group, RENDA_SM) %>%
+    mutate(across(where(is.character), as.factor), across(where(is.factor), as.numeric)) %>%
+    select(where(~ var(.x, na.rm = TRUE) > 0))
+  
+  pca_res <- prcomp(covariates, scale. = TRUE)
+  plot_data_pca <- matched_data %>%
+    mutate(PC1 = pca_res$x[, 1], PC2 = pca_res$x[, 2],
+           Status = ifelse(Treated == 1, "Treated", "Control (Counterfactual)"))
+  
+  ggplot(plot_data_pca, aes(x = PC1, y = PC2, color = Status, fill = Status)) +
+    stat_density_2d(aes(alpha = after_stat(level)), geom = "polygon", bins = 5) +
+    geom_point(alpha = 0.4, size = 1) +
+    scale_color_manual(values = c("Control (Counterfactual)" = color_ctrl, "Treated" = color_trt)) +
+    scale_fill_manual(values = c("Control (Counterfactual)" = color_ctrl, "Treated" = color_trt)) +
+    labs(title = paste("PCA Overlap -", strata_name)) + 
+    theme_minimal(base_family = font_family) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(face = "bold", size = 12),
+      axis.text = element_text(size = 10)
+    )
+}
+
+gerar_plots_tendencia <- function(strata_data, strata_name,
+                                  font_family = "sans",
+                                  color_ctrl_full = "#a39a92",
+                                  color_trt_full = "#77685d",
+                                  color_ctrl_strata = "#483d3f",
+                                  color_trt_strata = "#058ed9",
+                                  linetype_full = "dashed",  # Line type for the Global Baseline
+                                  linetype_strata = "solid", # Line type for the specific Strata
+                                  y_breaks_ext = waiver(),
+                                  y_breaks_int = waiver(),
+                                  x_breaks = c(1997, 2007, 2017, 2023)) {
+  
+  full_trend <- experiments$Full$matched_data %>%
+    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0)) %>%
+    group_by(Year, Treated) %>%
+    summarise(
+      Extensive = weighted.mean(Y_Binary, w = FE_PESS, na.rm = TRUE),
+      Intensive = weighted.mean(TOT_VIAG, w = FE_PESS, na.rm = TRUE), .groups = "drop"
+    ) %>%
+    mutate(Grupo = ifelse(Treated == 1, "Treated (Full)", "Control (Full)"), Contexto = "Baseline Global")
+  
+  strata_trend <- strata_data %>%
+    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0)) %>%
+    group_by(Year, Treated) %>%
+    summarise(
+      Extensive = weighted.mean(Y_Binary, w = FE_PESS, na.rm = TRUE),
+      Intensive = weighted.mean(TOT_VIAG, w = FE_PESS, na.rm = TRUE), .groups = "drop"
+    ) %>%
+    mutate(Grupo = ifelse(Treated == 1, paste("Treated", strata_name), paste("Control", strata_name)), Contexto = strata_name)
+  
+  plot_data <- bind_rows(full_trend, strata_trend)
+  cores <- setNames(c(color_ctrl_full, color_trt_full, color_ctrl_strata, color_trt_strata),
+                    c("Control (Full)", "Treated (Full)", paste("Control", strata_name), paste("Treated", strata_name)))
+  
+  # Injecting the new parameters here:
+  linhas <- setNames(c(linetype_full, linetype_strata), c("Baseline Global", strata_name))
+  
+  # Centralized aesthetic logic for both plots
+  custom_theme <- theme_minimal(base_family = font_family) + 
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(face = "bold", size = 12),
+      axis.text = element_text(size = 10),
+      legend.title = element_blank() 
+    )
+  
+  p_ext <- ggplot(plot_data, aes(x = Year, y = Extensive, color = Grupo, linetype = Contexto)) +
+    geom_vline(xintercept = 2018, linetype = "dotted", color = "gray50", linewidth = 1) +
+    geom_line(linewidth = 0.8) + geom_point(size = 3) +
+    scale_color_manual(values = cores) + scale_linetype_manual(values = linhas) +
+    scale_x_continuous(breaks = x_breaks) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = y_breaks_ext) +
+    labs(title = paste("Extensive Margin:", strata_name), y = "How Likely To Make a Trip", x = "Year") +
+    custom_theme
+    
+  p_int <- ggplot(plot_data, aes(x = Year, y = Intensive, color = Grupo, linetype = Contexto)) +
+    geom_vline(xintercept = 2018, linetype = "dotted", color = "gray50", linewidth = 1) +
+    geom_line(linewidth = 0.8) + geom_point(size = 3) +
+    scale_color_manual(values = cores) + scale_linetype_manual(values = linhas) +
+    scale_x_continuous(breaks = x_breaks) +
+    scale_y_continuous(breaks = y_breaks_int) +
+    labs(title = paste("Intensive Margin:", strata_name), y = "Average Number of Trips (N)", x = "Year") +
+    custom_theme
+    
+  list(ext = p_ext, int = p_int)
+}
+
+```
+
+::: panel-tabset
+## S1: All (\< 0.77 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S1_All$matched_data, "S1 All", font_family = "NHG")
+love.plot(experiments$S1_All$match_obj, binary = "std", continuous = "std", 
+          abs = TRUE, thresholds = c(m = .1), title = "SMD - S1 All") + 
+  theme_minimal(base_family = "NHG")
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s1_a <- gerar_plots_tendencia(experiments$S1_All$matched_data, "S1_All", font_family = "NHG")
+t_s1_a$ext
+t_s1_a$int
+
+```
+
+## S1: Men (\< 0.77 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S1_Male$matched_data, "S1 Male", font_family = "NHG")
+love.plot(experiments$S1_Male$match_obj, binary = "std", continuous = "std", 
+          abs = TRUE, thresholds = c(m = .1), title = "SMD - S1 Male") + 
+  theme_minimal(base_family = "NHG")
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s1_m <- gerar_plots_tendencia(experiments$S1_Male$matched_data, "S1_Male", font_family = "NHG")
+t_s1_m$ext
+t_s1_m$int
+
+```
+
+## S1: Women (\< 0.77 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S1_Female$matched_data, "S1 Female", font_family = "NHG")
+love.plot(experiments$S1_Female$match_obj, binary = "std", continuous = "std", 
+          abs = TRUE, thresholds = c(m = .1), title = "SMD - S1 Female") + 
+  theme_minimal(base_family = "NHG")
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s1_f <- gerar_plots_tendencia(experiments$S1_Female$matched_data, "S1_Female", font_family = "NHG")
+t_s1_f$ext
+t_s1_f$int
+
+```
+
+## S2: All (0.77-2.01 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S2_All$matched_data, "S2 All", font_family = "NHG")
+love.plot(experiments$S2_All$match_obj, binary = "std", continuous = "std", 
+          abs = TRUE, thresholds = c(m = .1), title = "SMD - S2 All") + 
+  theme_minimal(base_family = "NHG")
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s2_a <- gerar_plots_tendencia(experiments$S2_All$matched_data, "S2_All", font_family = "NHG")
+t_s2_a$ext
+t_s2_a$int
+
+```
+
+## S2: Men (0.77-2.01 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S2_Male$matched_data, "S2 Male", font_family = "NHG")
+love.plot(experiments$S2_Male$match_obj, binary = "std", continuous = "std", 
+          abs = TRUE, thresholds = c(m = .1), title = "SMD - S2 Male") + 
+  theme_minimal(base_family = "NHG")
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s2_m <- gerar_plots_tendencia(experiments$S2_Male$matched_data, "S2_Male", font_family = "NHG")
+t_s2_m$ext
+t_s2_m$int
+
+```
+
+## S2: Women (0.77-2.01 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S2_Female$matched_data, "S2 Female", font_family = "NHG")
+love.plot(experiments$S2_Female$match_obj, binary = "std", continuous = "std", 
+          abs = TRUE, thresholds = c(m = .1), title = "SMD - S2 Female") + 
+  theme_minimal(base_family = "NHG")
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s2_f <- gerar_plots_tendencia(experiments$S2_Female$matched_data, "S2_Female", font_family = "NHG")
+t_s2_f$ext
+t_s2_f$int
+
+```
+
+## S3: All (\> 2.01 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S3_All$matched_data, "S3 All", font_family = "NHG")
+love.plot(experiments$S3_All$match_obj, binary = "std", continuous = "std", 
+          abs = TRUE, thresholds = c(m = .1), title = "SMD - S3 All") + 
+  theme_minimal(base_family = "NHG")
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s3_a <- gerar_plots_tendencia(experiments$S3_All$matched_data, "S3_All", font_family = "NHG")
+t_s3_a$ext
+t_s3_a$int
+
+```
+
+## S3: Men (\> 2.01 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S3_Male$matched_data, "S3 Male", font_family = "NHG")
+love.plot(experiments$S3_Male$match_obj, binary = "std", continuous = "std", 
+          abs = TRUE, thresholds = c(m = .1), title = "SMD - S3 Male") + 
+  theme_minimal(base_family = "NHG")
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s3_m <- gerar_plots_tendencia(experiments$S3_Male$matched_data, "S3_Male", font_family = "NHG")
+t_s3_m$ext
+t_s3_m$int
+
+```
+
+## S3: Women (\> 2.01 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S3_Female$matched_data, "S3 Female", font_family = "NHG")
+love.plot(experiments$S3_Female$match_obj, binary = "std", continuous = "std", 
+          abs = TRUE, thresholds = c(m = .1), title = "SMD - S3 Female") + 
+  theme_minimal(base_family = "NHG")
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s3_f <- gerar_plots_tendencia(experiments$S3_Female$matched_data, "S3_Female", font_family = "NHG")
+t_s3_f$ext
+t_s3_f$int
+
+```
+:::
+
+```{r}
+
+#| label: export-artefacts
+#| message: false
+#| warning: false
+
+# 1. Define the new strata keys
+strata_keys <- c("S1_Male", "S1_Female", "S2_Male", "S2_Female", "S3_Male", "S3_Female")
+
+# 2. Loop through and export all plots as vector SVG
+for (s in strata_keys) {
+  
+  p_pca <- gerar_pca(
+    matched_data = experiments[[s]]$matched_data, 
+    strata_name = s,
+    font_family = "NHG"
+  )
+  ggsave(here("outputs", "figures", paste0("pca_overlap_", s, ".png")), 
+         plot = p_pca, device = "png", width = 8, height = 6, bg = "white")
+  
+  p_love <- love.plot(experiments[[s]]$match_obj, binary = "std", continuous = "std", 
+                      abs = TRUE, thresholds = c(m = .1), 
+                      title = paste("Balanço SMD -", s)) + 
+    theme_minimal(base_family = "NHG") +
+    theme(plot.title = element_text(face = "bold"))
+  
+  ggsave(here("outputs", "figures", paste0("love_plot_", s, ".png")), 
+         plot = p_love, device = "png", width = 8, height = 6, bg = "white")
+  
+  p_trends <- gerar_plots_tendencia(
+    strata_data = experiments[[s]]$matched_data, 
+    strata_name = s,
+    font_family = "NHG"
+  )
+  
+  ggsave(here("outputs", "figures", paste0("trend_extensive_", s, ".png")), 
+         plot = p_trends$ext, device = "png", width = 8, height = 5, bg = "white")
+  
+  ggsave(here("outputs", "figures", paste0("trend_intensive_", s, ".png")), 
+         plot = p_trends$int, device = "png", width = 8, height = 5, bg = "white")
+}
+
+# 4. Export the Master Table
+write_csv(master_table, here("outputs", "tables", "master_sample_table-6s.csv"))
+
+message("(EN) All Vector Plots (.png) and Data were exported to 'outputs/' folder!")
+
+
+```
+```
+
+================================================================================
+File: D:/jade-line-impact/jade-line-impact/analysis/03_diagnostics.qmd
+================================================================================
+```
+---
+title: "03 - Diagnostics and Visualizations"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: setup-fonts
+#| message: false
+
+library(showtext)
+
+# Map the two existing files. 
+font_add(
+  family = "NHG", 
+  regular = "C:/WINDOWS/FONTS/NHAASGROTESKTXPRO-RG.TTF",
+  italic  = "C:/WINDOWS/FONTS/NHAASGROTESKTXPRO-IT.TTF"
+)
+
+# Tell R to automatically use showtext for rendering graphics
+showtext_auto()
+
+```
+
+```{r}
+#| label: load-artifacts
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(cobalt)
+library(ggplot2)
+library(here)
+
+experiments <- readRDS(here("data", "processed", "02_experiments_results.rds"))
+master_table <- readRDS(here("data", "processed", "02_master_sample_table.rds"))
+```
+
+## Master Sample Table & Causal Estimates
+```{r}
+#| label: tbl-master
+
+knitr::kable(master_table, caption = "Sample Size & DiD Estimates per Stratum")
+```
+
+## Common Support (PCA) and Balance (Love Plots)
+```{r}
+#| label: diagnostic-functions
+
+gerar_pca <- function(matched_data, strata_name, 
+                      font_family = "sans", 
+                      color_ctrl = "#999999", 
+                      color_trt = "#E69F00") {
+  
+  covariates <- matched_data %>%
+    select(sexo_harm, educ_harm, activity_harm, has_car, age_group, RENDA_SM) %>%
+    mutate(across(where(is.character), as.factor), across(where(is.factor), as.numeric)) %>%
+    select(where(~ var(.x, na.rm = TRUE) > 0))
+  
+  pca_res <- prcomp(covariates, scale. = TRUE)
+  plot_data_pca <- matched_data %>%
+    mutate(PC1 = pca_res$x[, 1], PC2 = pca_res$x[, 2],
+           Status = ifelse(Treated == 1, "Treated", "Control (Counterfactual)"))
+  
+  ggplot(plot_data_pca, aes(x = PC1, y = PC2, color = Status, fill = Status)) +
+    stat_density_2d(aes(alpha = after_stat(level)), geom = "polygon", bins = 5) +
+    geom_point(alpha = 0.4, size = 1) +
+    scale_color_manual(values = c("Control (Counterfactual)" = color_ctrl, "Treated" = color_trt)) +
+    scale_fill_manual(values = c("Control (Counterfactual)" = color_ctrl, "Treated" = color_trt)) +
+    labs(title = paste("PCA Overlap -", strata_name)) + 
+    theme_minimal(base_family = font_family) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(face = "bold", size = 12),
+      axis.text = element_text(size = 10)
+    )
+}
+
+gerar_plots_tendencia <- function(strata_data, strata_name,
+                                  font_family = "sans",
+                                  color_ctrl_full = "#a39a92",
+                                  color_trt_full = "#77685d",
+                                  color_ctrl_strata = "#483d3f",
+                                  color_trt_strata = "#058ed9",
+                                  linetype_full = "dashed",  # Line type for the Global Baseline
+                                  linetype_strata = "solid", # Line type for the specific Strata
+                                  y_breaks_ext = waiver(),
+                                  y_breaks_int = waiver(),
+                                  x_breaks = c(1997, 2007, 2017, 2023)) {
+  
+  full_trend <- experiments$Full$matched_data %>%
+    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0)) %>%
+    group_by(Year, Treated) %>%
+    summarise(
+      Extensive = weighted.mean(Y_Binary, w = FE_PESS, na.rm = TRUE),
+      Intensive = weighted.mean(TOT_VIAG, w = FE_PESS, na.rm = TRUE), .groups = "drop"
+    ) %>%
+    mutate(Grupo = ifelse(Treated == 1, "Treated (Full)", "Control (Full)"), Contexto = "Baseline Global")
+  
+  strata_trend <- strata_data %>%
+    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0)) %>%
+    group_by(Year, Treated) %>%
+    summarise(
+      Extensive = weighted.mean(Y_Binary, w = FE_PESS, na.rm = TRUE),
+      Intensive = weighted.mean(TOT_VIAG, w = FE_PESS, na.rm = TRUE), .groups = "drop"
+    ) %>%
+    mutate(Grupo = ifelse(Treated == 1, paste("Treated", strata_name), paste("Control", strata_name)), Contexto = strata_name)
+  
+  plot_data <- bind_rows(full_trend, strata_trend)
+  cores <- setNames(c(color_ctrl_full, color_trt_full, color_ctrl_strata, color_trt_strata),
+                    c("Control (Full)", "Treated (Full)", paste("Control", strata_name), paste("Treated", strata_name)))
+  
+  # Injecting the new parameters here:
+  linhas <- setNames(c(linetype_full, linetype_strata), c("Baseline Global", strata_name))
+  
+  # Centralized aesthetic logic for both plots
+  custom_theme <- theme_minimal(base_family = font_family) + 
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(face = "bold", size = 12),
+      axis.text = element_text(size = 10),
+      legend.title = element_blank() 
+    )
+  
+  p_ext <- ggplot(plot_data, aes(x = Year, y = Extensive, color = Grupo, linetype = Contexto)) +
+    geom_vline(xintercept = 2018, linetype = "dotted", color = "gray50", linewidth = 1) +
+    geom_line(linewidth = 0.8) + geom_point(size = 3) +
+    scale_color_manual(values = cores) + scale_linetype_manual(values = linhas) +
+    scale_x_continuous(breaks = x_breaks) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = y_breaks_ext) +
+    labs(title = paste("Extensive Margin:", strata_name), y = "How Likely To Make a Trip", x = "Year") +
+    custom_theme
+    
+  p_int <- ggplot(plot_data, aes(x = Year, y = Intensive, color = Grupo, linetype = Contexto)) +
+    geom_vline(xintercept = 2018, linetype = "dotted", color = "gray50", linewidth = 1) +
+    geom_line(linewidth = 0.8) + geom_point(size = 3) +
+    scale_color_manual(values = cores) + scale_linetype_manual(values = linhas) +
+    scale_x_continuous(breaks = x_breaks) +
+    scale_y_continuous(breaks = y_breaks_int) +
+    labs(title = paste("Intensive Margin:", strata_name), y = "Average Number of Trips (N)", x = "Year") +
+    custom_theme
+    
+  list(ext = p_ext, int = p_int)
+}
+
+```
+
+::: {.panel-tabset}
+
+## S1: Baixa Renda (0-0.77 SM)
+
+```{r}
+#| layout-ncol: 2
+
+gerar_pca(experiments$S1$matched_data, "S1")
+love.plot(experiments$S1$match_obj, binary = "std", continuous = "std", abs = TRUE, thresholds = c(m = .1), title = "SMD - S1") + theme_minimal()
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s1 <- gerar_plots_tendencia(experiments$S1$matched_data, "S1")
+t_s1$ext
+t_s1$int
+
+```
+
+## S2: Renda Média-Baixa (0.77-2.01 SM)
+
+```{r}
+#|  layout-ncol: 2
+
+gerar_pca(experiments$S2$matched_data, "S2")
+love.plot(experiments$S2$match_obj, binary = "std", continuous = "std", abs = TRUE, thresholds = c(m = .1), title = "SMD - S2") + theme_minimal()
+
+```
+
+```{r}
+#| layout-ncol: 2
+#| 
+t_s2 <- gerar_plots_tendencia(experiments$S2$matched_data, "S2")
+t_s2$ext
+t_s2$int
+
+```
+
+## S3: Média/Alta Renda (> 2.01 SM)
+
+```{r}
+#| layout-ncol: 2
+#| 
+gerar_pca(experiments$S3$matched_data, "S3")
+love.plot(experiments$S3$match_obj, binary = "std", continuous = "std", abs = TRUE, thresholds = c(m = .1), title = "SMD - S3") + theme_minimal()
+
+```
+
+```{r}
+#| layout-ncol: 2
+
+t_s3 <- gerar_plots_tendencia(experiments$S3$matched_data, "S3")
+t_s3$ext
+t_s3$int
+
+```
+
+```{r}
+
+#| label: export-artefacts
+#| message: false
+#| warning: false
+
+# 1. Define the strata to iterate over
+strata_keys <- c("S1", "S2", "S3")
+
+# 2. Loop through and export all plots
+for (s in strata_keys) {
+  
+  # A. Export PCA Plot (Applying the font here)
+  p_pca <- gerar_pca(
+    matched_data = experiments[[s]]$matched_data, 
+    strata_name = s,
+    font_family = "Neue Haas Grotesk"
+  )
+  ggsave(here("outputs", "figures", paste0("pca_overlap_", s, ".png")), 
+         plot = p_pca, width = 8, height = 6, dpi = 300, bg = "white")
+  
+  # B. Export Love Plot 
+  # (Love plots from cobalt use a slightly different theme syntax, so we apply it directly)
+  p_love <- love.plot(experiments[[s]]$match_obj, binary = "std", continuous = "std", 
+                      abs = TRUE, thresholds = c(m = .1), 
+                      title = paste("Balanço SMD -", s)) + 
+    theme_minimal(base_family = "Neue Haas Grotesk") +
+    theme(plot.title = element_text(face = "bold"))
+  
+  ggsave(here("outputs", "figures", paste0("love_plot_", s, ".png")), 
+         plot = p_love, width = 8, height = 6, dpi = 300, bg = "white")
+  
+  # C. Export Trend Plots (Applying the font to both Ext and Int plots at once)
+  p_trends <- gerar_plots_tendencia(
+    strata_data = experiments[[s]]$matched_data, 
+    strata_name = s,
+    font_family = "Neue Haas Grotesk"
+  )
+  
+  ggsave(here("outputs", "figures", paste0("trend_extensive_", s, ".png")), 
+         plot = p_trends$ext, width = 8, height = 5, dpi = 300, bg = "white")
+  
+  ggsave(here("outputs", "figures", paste0("trend_intensive_", s, ".png")), 
+         plot = p_trends$int, width = 8, height = 5, dpi = 300, bg = "white")
+}
+
+# 4. Export the Master Table
+write_csv(master_table, here("outputs", "tables", "master_sample_table.csv"))
+
+message("(EN) All Plots and Data were exported to 'outputs/' folder!")
+message("(PT) Todos os gráficos e tabelas foram exportados com sucesso para a pasta 'outputs/'!")
+
+
+```
+
+```
+
+================================================================================
+File: D:/jade-line-impact/jade-line-impact/jade-line-impact.qmd
+================================================================================
+```
+---
+title: "jade-line-impact"
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+```{r}
+1 + 1
+```
+```
+
+================================================================================
+File: D:/jade-line-impact/jade-line-impact/R/spatial_helpers.R
+================================================================================
+```
+# R/spatial_helpers.R
+
+library(sf)
+library(dplyr)
+library(purrr)
+
+#' Generate Areal Weights between two zones
+#'
+#' @description
+#' Calculates the proportion of the 'Source' zone that falls into the 'Target' zone.
+#'
+#' @note
+#' Although arguments are named 'newer' and 'older', this function works for any direction.
+#' - To Backcast (2023 -> 2007): zones_newer = 2023 (Source), zones_older = 2007 (Target)
+#' - To Forecast (1997 -> 2007): zones_newer = 1997 (Source), zones_older = 2007 (Target)
+#'
+#' @param zones_newer The SOURCE layer (Denominator of weight calculation)
+#' @param zones_older The TARGET layer (Geometry we are fitting into)
+generate_weights <- function(zones_newer, zones_older, id_newer, id_older, year_newer, year_older) {
+  
+  # 1. Dynamic column names for the final output (e.g., "Z_2023")
+  col_new <- paste0("Z_", year_newer)
+  col_old <- paste0("Z_", year_older)
+  
+  # 2. Force unique temporary names before intersection
+  # We use standard R renaming to be safe
+  names(zones_newer)[names(zones_newer) == id_newer] <- "temp_id_new"
+  names(zones_older)[names(zones_older) == id_older] <- "temp_id_old"
+  
+  # 3. Standardize Geometries
+  zones_newer <- sf::st_make_valid(zones_newer)
+  zones_older <- sf::st_make_valid(zones_older)
+  
+  if (sf::st_crs(zones_newer) != sf::st_crs(zones_older)) {
+    zones_older <- sf::st_transform(zones_older, sf::st_crs(zones_newer))
+  }
+  
+  # 4. Calculate areas and intersect
+  zones_newer$total_area_new <- as.numeric(sf::st_area(zones_newer))
+  
+  intersection <- sf::st_intersection(
+    zones_newer[, c("temp_id_new", "total_area_new")],
+    zones_older[, c("temp_id_old")]
+  )
+  
+  # 5. Calculate weights and rename to final year-based names
+  intersection %>%
+    dplyr::mutate(
+      sliver_area = as.numeric(sf::st_area(.)),
+      weight = sliver_area / total_area_new
+    ) %>%
+    sf::st_drop_geometry() %>%
+    dplyr::select(temp_id_new, temp_id_old, weight) %>%
+    # Rename using base R to handle dynamic string names easily
+    dplyr::rename(!!col_new := temp_id_new, !!col_old := temp_id_old) %>%
+    dplyr::filter(weight > 0.001)
+}
+
+#' Chain a list of correspondence tables
+chain_zones <- function(table_list) {
+  
+  if (length(table_list) < 1) stop("Need at least one table.")
+  
+  purrr::reduce(table_list, function(prev, next_tab) {
+    # Find the common column (e.g., "Z_2017" exists in both)
+    link_col <- intersect(names(prev), names(next_tab))
+    link_col <- setdiff(link_col, "weight")
+    
+    if (length(link_col) == 0) stop("Broken chain: No common column found between tables.")
+    
+    # Join and multiply weights
+    dplyr::left_join(prev, next_tab, by = link_col) %>%
+      dplyr::mutate(weight = weight.x * weight.y) %>%
+      dplyr::select(-weight.x, -weight.y)
+  }) %>%
+    # Final aggregation: group by the very first and very last columns
+    dplyr::group_by(across(c(1, ncol(.)-1))) %>% # Assumes weight is last column
+    dplyr::summarise(weight = sum(weight), .groups = "drop")
+}
+
+#' Build a master key between any two arbitrary years
+get_chain <- function(start_year, end_year, table_list, ordered_years = c(2023, 2017, 2007, 1997, 1987, 1977)) {
+  
+  # 1. Find where these years sit in the ordered timeline
+  idx_start <- match(start_year, ordered_years)
+  idx_end <- match(end_year, ordered_years)
+  
+  # 2. Validation
+  if (is.na(idx_start)) stop(paste("Start year", start_year, "not found in ordered timeline."))
+  if (is.na(idx_end)) stop(paste("End year", end_year, "not found in ordered timeline."))
+  if (idx_start >= idx_end) stop("Start year must be more recent than end year.")
+  
+  # 3. Identify which tables bridge this gap
+  # If ordered_years is [23, 17, 07...], then:
+  # Table 1 is 23->17
+  # Table 2 is 17->07
+  # So if we want 17->87 (indices 2 to 5), we need tables 2, 3, and 4.
+  needed_indices <- idx_start:(idx_end - 1)
+  
+  subset_list <- table_list[needed_indices]
+  
+  message(paste("🔗 Chaining", length(subset_list), "tables from", start_year, "to", end_year, "..."))
+  
+  # 4. Pass the subset to the main worker function
+  return(chain_zones(subset_list))
+}
+
+#' Harmonize OD data (microdata or aggregated) to a target year
+harmonize_od_data <- function(od_data, master_key, origin_col, dest_col,
+                              trips_col = NULL,   # OPTIONAL: If NULL, assumes 1 trip per row
+                              group_vars = NULL,  # OPTIONAL: Extra columns to keep (e.g., "Reason")
+                              key_zone_newer, key_zone_older, key_weight = "weight") {
+  
+  # 1. Prepare Trip Counts
+  # If no trips_col provided, assume each row is 1 trip
+  if (is.null(trips_col)) {
+    od_data$temp_trips_internal <- 1
+    trips_col_name <- "temp_trips_internal"
+  } else {
+    trips_col_name <- trips_col
+  }
+  
+  # 2. Standardize Key Names for easy joins
+  key_std <- master_key %>%
+    dplyr::rename(
+      Z_New = !!key_zone_newer,
+      Z_Old = !!key_zone_older,
+      W = !!key_weight
+    )
+  
+  # 3. The Harmonization Pipeline
+  od_harmonized <- od_data %>%
+    # JOIN 1: Translate Origins
+    # We use .data[[string]] to refer to dynamic column names
+    dplyr::inner_join(key_std, by = setNames("Z_New", origin_col), relationship = "many-to-many") %>%
+    dplyr::rename(Orig_Old = Z_Old, W_Orig = W) %>%
+    
+    # JOIN 2: Translate Destinations
+    dplyr::inner_join(key_std, by = setNames("Z_New", dest_col), relationship = "many-to-many") %>%
+    dplyr::rename(Dest_Old = Z_Old, W_Dest = W) %>%
+    
+    # CALCULATE: Apply compound weights to the trip count
+    dplyr::mutate(Trips_Harmonized = .data[[trips_col_name]] * W_Orig * W_Dest) %>%
+    
+    # AGGREGATE: Sum trips by Old OD Pair AND any extra grouping variables
+    dplyr::group_by(dplyr::across(dplyr::all_of(c("Orig_Old", "Dest_Old", group_vars)))) %>%
+    dplyr::summarise(Trips = sum(Trips_Harmonized), .groups = "drop")
+  
+  return(od_harmonized)
+}
+```
+
+

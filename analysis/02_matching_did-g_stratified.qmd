@@ -17,7 +17,7 @@ library(sandwich)
 library(purrr)
 library(here)
 
-panel_base <- readRDS(here("data", "processed", "01_panel_base_6s.rds"))
+panel_base <- readRDS(here("data", "processed", "01_panel_base_9s.rds"))
 
 run_strata_experiment <- function(min_sm, max_sm, target_gender, strata_name, data) {
   
@@ -25,67 +25,82 @@ run_strata_experiment <- function(min_sm, max_sm, target_gender, strata_name, da
   
   # Dynamic Formulas based on Gender Stratification
   if (target_gender != "All") {
-    # For the 6 slices: Pre-filter the data. exact = ~Year is enough.
     df_filtered <- df_filtered %>% filter(sexo_harm == target_gender)
-    
     form_match <- Treated ~ educ_harm + activity_harm + has_car + age_group + RENDA_SM
     form_exact <- ~ Year
-    
-    # Regression formulas without sexo_harm
     form_did_ext <- Y_Binary ~ Treated * Year_Factor + educ_harm + activity_harm + has_car + age_group
     form_did_int <- TOT_VIAG ~ Treated * Year_Factor + educ_harm + activity_harm + has_car + age_group
-    
   } else {
-    # For the Global Baseline: Force exact matching on both Year AND Gender
     form_match <- Treated ~ educ_harm + activity_harm + has_car + age_group + RENDA_SM
     form_exact <- ~ Year + sexo_harm
-    
-    # Regression formulas with sexo_harm
     form_did_ext <- Y_Binary ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group
     form_did_int <- TOT_VIAG ~ Treated * Year_Factor + sexo_harm + educ_harm + activity_harm + has_car + age_group
   }
   
-  match_obj <- matchit(
-    formula = form_match,
-    data = df_filtered, method = "nearest", distance = "mahalanobis",
-    exact = form_exact, 
-    ratio = 3, replace = FALSE 
-  )
+  # Internal Helper to run matching and DiD for a given distance method
+  run_match_method <- function(dist_method, dist_label) {
+    match_obj <- matchit(
+      formula = form_match,
+      data = df_filtered, method = "nearest", distance = dist_method,
+      exact = form_exact, ratio = 1, replace = FALSE 
+    )
+    
+    matched_data <- match.data(match_obj) %>% mutate(Strata = strata_name, Match_Type = dist_label)
+    
+    did_df <- matched_data %>%
+      mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0), Year_Factor = relevel(factor(Year), ref = "2017"))
+    
+    # FIX FOR SCOPING: Update formula environments to the current local environment
+    # so vcovCL() can find 'did_df' when it re-evaluates the model.
+    environment(form_did_ext) <- environment()
+    environment(form_did_int) <- environment()
+    
+    # Extensive Margin
+    model_ext <- lm(form_did_ext, data = did_df, weights = FE_PESS)
+    res_ext <- tidy(coeftest(model_ext, vcov = vcovCL(model_ext, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+    
+    # Intensive Margin
+    model_int <- lm(form_did_int, data = did_df, weights = FE_PESS)
+    res_int <- tidy(coeftest(model_int, vcov = vcovCL(model_int, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
+    
+    n_pre <- df_filtered %>% group_by(Year, Treated) %>% summarise(N_Pre = n(), .groups = "drop")
+    n_post <- matched_data %>% group_by(Year, Treated) %>% summarise(N_Post = n(), .groups = "drop")
+    
+    sample_table <- n_pre %>%
+      left_join(n_post, by = c("Year", "Treated")) %>%
+      mutate(Grupo = ifelse(Treated == 1, "Tratado", "Controle")) %>% select(-Treated) %>%
+      pivot_wider(names_from = Grupo, values_from = c(N_Pre, N_Post), values_fill = 0) %>%
+      mutate(
+        Strata = strata_name,
+        Match_Type = dist_label,
+        DiD_Ext_Estimate = round(res_ext$estimate, 4), 
+        DiD_Ext_SE = round(res_ext$std.error, 4),      # NEW: Extract Standard Error
+        DiD_Ext_PValue = round(res_ext$p.value, 4),
+        DiD_Int_Estimate = round(res_int$estimate, 4), 
+        DiD_Int_SE = round(res_int$std.error, 4),      # NEW: Extract Standard Error
+        DiD_Int_PValue = round(res_int$p.value, 4)
+      ) %>%
+      select(Strata, Match_Type, Year, N_Pre_Controle, N_Pre_Tratado, N_Post_Controle, N_Post_Tratado, 
+             DiD_Ext_Estimate, DiD_Ext_SE, DiD_Ext_PValue, 
+             DiD_Int_Estimate, DiD_Int_SE, DiD_Int_PValue)
+    
+    # RESTORED MISSING RETURN AND CLOSING BRACKET HERE
+    return(list(sample_table = sample_table, matched_data = matched_data, match_obj = match_obj))
+  }
   
-  matched_data <- match.data(match_obj) %>% mutate(Strata = strata_name)
+  # Execute both methods
+  res_mah <- run_match_method("mahalanobis", "Mahalanobis")
+  res_log <- run_match_method("glm", "Logit")
   
-  did_df <- matched_data %>%
-    mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0), Year_Factor = relevel(factor(Year), ref = "2017"))
-  
-  # Extensive Margin
-  model_ext <- lm(form_did_ext, data = did_df, weights = FE_PESS)
-  res_ext <- tidy(coeftest(model_ext, vcov = vcovCL(model_ext, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
-  
-  # Intensive Margin
-  model_int <- lm(form_did_int, data = did_df, weights = FE_PESS)
-  res_int <- tidy(coeftest(model_int, vcov = vcovCL(model_int, cluster = ~ZONA_07))) %>% filter(grepl("Treated:Year_Factor2023", term))
-  
-  n_pre <- df_filtered %>% group_by(Year, Treated) %>% summarise(N_Pre = n(), .groups = "drop")
-  n_post <- matched_data %>% group_by(Year, Treated) %>% summarise(N_Post = n(), .groups = "drop")
-  
-  sample_table <- n_pre %>%
-    left_join(n_post, by = c("Year", "Treated")) %>%
-    mutate(Grupo = ifelse(Treated == 1, "Tratado", "Controle")) %>% select(-Treated) %>%
-    pivot_wider(names_from = Grupo, values_from = c(N_Pre, N_Post), values_fill = 0) %>%
-    mutate(
-      Strata = strata_name,
-      DiD_Ext_Estimate = round(res_ext$estimate, 4), DiD_Ext_PValue = round(res_ext$p.value, 4),
-      DiD_Int_Estimate = round(res_int$estimate, 4), DiD_Int_PValue = round(res_int$p.value, 4)
-    ) %>%
-    select(Strata, Year, N_Pre_Controle, N_Pre_Tratado, N_Post_Controle, N_Post_Tratado, 
-           DiD_Ext_Estimate, DiD_Ext_PValue, DiD_Int_Estimate, DiD_Int_PValue)
-
-  return(list(sample_table = sample_table, matched_data = matched_data, match_obj = match_obj))
+  return(list(mah = res_mah, log = res_log))
 }
 
-# The 6 New Strata Definitions (plus the global baseline)
+# The 9 New Strata Definitions (plus the global baseline)
 strata_defs <- list(
   list(0, Inf, "All", "Full Panel (Global)"),
+  list(0, 0.77, "All", "S1_All"),
+  list(0.77, 2.01, "All", "S2_All"),
+  list(2.01, Inf, "All", "S3_All"),
   list(0, 0.77, "Male", "S1_Male"),
   list(0, 0.77, "Female", "S1_Female"),
   list(0.77, 2.01, "Male", "S2_Male"),
@@ -95,25 +110,33 @@ strata_defs <- list(
 )
 
 experiments <- map(strata_defs, ~run_strata_experiment(.x[[1]], .x[[2]], .x[[3]], .x[[4]], panel_base))
-names(experiments) <- c("Full", "S1_Male", "S1_Female", "S2_Male", "S2_Female", "S3_Male", "S3_Female")
+names(experiments) <- c("Full", "S1_All", "S2_All", "S3_All", "S1_Male", "S1_Female", "S2_Male", "S2_Female", "S3_Male", "S3_Female")
 
-master_sample_table <- map_dfr(experiments, "sample_table")
-master_matched_data <- map_dfr(experiments[-1], "matched_data")
+# Extract and combine tables for BOTH methods
+master_sample_table <- map_dfr(experiments, ~ bind_rows(.x$mah$sample_table, .x$log$sample_table))
+
+# For Triple Difference (DDD), run two separate models to prevent duplicating records.
+master_matched_mah <- map_dfr(experiments[-1], ~ .x$mah$matched_data) %>% mutate(Year_Factor = relevel(factor(Year), ref = "2017"))
+master_matched_log <- map_dfr(experiments[-1], ~ .x$log$matched_data) %>% mutate(Year_Factor = relevel(factor(Year), ref = "2017"))
 
 # Triple Difference (DDD) - Intensive Margin
-master_matched_data$Year_Factor <- relevel(factor(master_matched_data$Year), ref = "2017")
-mod_ddd_int <- lm(
-  TOT_VIAG ~ Treated * Year_Factor * factor(Strata) + 
-    sexo_harm + educ_harm + activity_harm + has_car + age_group, 
-  data = master_matched_data, weights = FE_PESS
-)
-res_ddd_int <- coeftest(mod_ddd_int, vcov = vcovCL(mod_ddd_int, cluster = ~ZONA_07))
+# Mahalanobis
+mod_ddd_int_mah <- lm(TOT_VIAG ~ Treated * Year_Factor * factor(Strata) 
+                      + sexo_harm + educ_harm + activity_harm + has_car 
+                      + age_group, data = master_matched_mah, weights = FE_PESS)
+res_ddd_int_mah <- coeftest(mod_ddd_int_mah, vcov = vcovCL(mod_ddd_int_mah, cluster = ~ZONA_07))
+
+# Logit
+mod_ddd_int_log <- lm(TOT_VIAG ~ Treated * Year_Factor * factor(Strata)
+                      + sexo_harm + educ_harm + activity_harm + has_car 
+                      + age_group, data = master_matched_log, weights = FE_PESS)
+res_ddd_int_log <- coeftest(mod_ddd_int_log, vcov = vcovCL(mod_ddd_int_log, cluster = ~ZONA_07))
 
 # --- EXPORT ARTIFACTS ---
-saveRDS(master_sample_table, here("data", "processed", "02_master_sample_table-6s.rds"))
-saveRDS(master_matched_data, here("data", "processed", "02_master_matched_data-6s.rds"))
-saveRDS(experiments, here("data", "processed", "02_experiments_results-6s.rds"))
-saveRDS(res_ddd_int, here("data", "processed", "02_triple_diff_results-6s.rds"))
+saveRDS(master_sample_table, here("data", "processed", "02_master_sample_table-9s.rds"))
+saveRDS(list(mah = master_matched_mah, log = master_matched_log), here("data", "processed", "02_master_matched_data-9s.rds"))
+saveRDS(experiments, here("data", "processed", "02_experiments_results-9s.rds"))
+saveRDS(list(mah = res_ddd_int_mah, log = res_ddd_int_log), here("data", "processed", "02_triple_diff_results-9s.rds"))
 ```
 
 

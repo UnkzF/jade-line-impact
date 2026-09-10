@@ -33,11 +33,12 @@ library(cobalt)
 library(ggplot2)
 library(here)
 
-experiments <- readRDS(here("data", "processed", "02_experiments_results-6s.rds"))
-master_table <- readRDS(here("data", "processed", "02_master_sample_table-6s.rds"))
+experiments <- readRDS(here("data", "processed", "02_experiments_results-9s.rds"))
+master_table <- readRDS(here("data", "processed", "02_master_sample_table-9s.rds"))
 ```
 
 ## Master Sample Table & Causal Estimates
+
 ```{r}
 #| label: tbl-master
 
@@ -45,6 +46,7 @@ knitr::kable(master_table, caption = "Sample Size & DiD Estimates per Stratum")
 ```
 
 ## Common Support (PCA) and Balance (Love Plots)
+
 ```{r}
 #| label: diagnostic-functions
 
@@ -77,19 +79,33 @@ gerar_pca <- function(matched_data, strata_name,
     )
 }
 
-gerar_plots_tendencia <- function(strata_data, strata_name,
+gerar_ps_overlap <- function(match_obj, strata_name, font_family = "sans") {
+  bal.plot(match_obj, var.name = "distance", which = "both", type = "density", mirror = FALSE) +
+    scale_fill_manual(values = c("0" = scales::alpha("#483d3f", 0.6), "1" = scales::alpha("#058ed9", 0.6))) +
+    scale_color_manual(values = c("0" = "#483d3f", "1" = "#058ed9")) +
+    labs(title = paste("P-Score Overlap (Logit) -", strata_name)) +
+    theme_minimal(base_family = font_family) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(face = "bold", size = 12),
+      legend.position = "bottom",
+      legend.title = element_blank()
+    )
+}
+
+gerar_plots_tendencia <- function(strata_data, strata_name, full_data,
                                   font_family = "sans",
                                   color_ctrl_full = "#a39a92",
-                                  color_trt_full = "#77685d",
+                                  color_trt_full = "#058ed9",
                                   color_ctrl_strata = "#483d3f",
                                   color_trt_strata = "#058ed9",
-                                  linetype_full = "dashed",  # Line type for the Global Baseline
-                                  linetype_strata = "solid", # Line type for the specific Strata
+                                  linetype_full = "dashed",  
+                                  linetype_strata = "solid", 
                                   y_breaks_ext = waiver(),
                                   y_breaks_int = waiver(),
                                   x_breaks = c(1997, 2007, 2017, 2023)) {
   
-  full_trend <- experiments$Full$matched_data %>%
+  full_trend <- full_data %>%
     mutate(Y_Binary = ifelse(TOT_VIAG > 0, 1, 0)) %>%
     group_by(Year, Treated) %>%
     summarise(
@@ -111,10 +127,8 @@ gerar_plots_tendencia <- function(strata_data, strata_name,
   cores <- setNames(c(color_ctrl_full, color_trt_full, color_ctrl_strata, color_trt_strata),
                     c("Control (Full)", "Treated (Full)", paste("Control", strata_name), paste("Treated", strata_name)))
   
-  # Injecting the new parameters here:
   linhas <- setNames(c(linetype_full, linetype_strata), c("Baseline Global", strata_name))
   
-  # Centralized aesthetic logic for both plots
   custom_theme <- theme_minimal(base_family = font_family) + 
     theme(
       legend.position = "bottom",
@@ -147,137 +161,179 @@ gerar_plots_tendencia <- function(strata_data, strata_name,
 
 ```
 
-::: {.panel-tabset}
-
-## S1: Men (< 0.77 SM)
-
 ```{r}
-#| layout-ncol: 2
+#| label: render-html-tabsets
+#| results: "asis"
+#| fig-width: 8
+#| fig-height: 5
+#| warning: false
+#| message: false
 
-gerar_pca(experiments$S1_Male$matched_data, "S1 Male", font_family = "NHG")
-love.plot(experiments$S1_Male$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S1 Male") + 
-  theme_minimal(base_family = "NHG")
+strata_keys <- c("Full", "S1_All", "S1_Male", "S1_Female", 
+                 "S2_All", "S2_Male", "S2_Female", 
+                 "S3_All", "S3_Male", "S3_Female")
+
+cat("::: panel-tabset\n\n")
+
+for (s in strata_keys) {
+  cat(paste0("## ", s, "\n\n"))
+  
+  # --- MAHALANOBIS SUB-TAB ---
+  cat("### Mahalanobis\n\n")
+  
+  p_pca_m <- gerar_pca(experiments[[s]]$mah$matched_data, paste(s, "(Mahalanobis)"), font_family = "NHG")
+  p_love_m <- love.plot(experiments[[s]]$mah$match_obj, binary = "std", continuous = "std", 
+                        abs = TRUE, thresholds = c(m = .1), title = paste("SMD -", s, "(Mah)")) + 
+              theme_minimal(base_family = "NHG")
+  
+  print(p_pca_m)
+  cat("\n\n")
+  print(p_love_m)
+  cat("\n\n")
+  
+  t_mah <- gerar_plots_tendencia(
+    strata_data = experiments[[s]]$mah$matched_data, 
+    strata_name = s, 
+    full_data = experiments$Full$mah$matched_data, 
+    font_family = "NHG"
+  )
+  
+  print(t_mah$ext)
+  cat("\n\n")
+  print(t_mah$int)
+  cat("\n\n")
+  
+  # --- LOGIT SUB-TAB ---
+  cat("### Logit (Propensity Score)\n\n")
+  
+  p_pca_l <- gerar_pca(experiments[[s]]$log$matched_data, paste(s, "(Logit)"), font_family = "NHG")
+  p_love_l <- love.plot(experiments[[s]]$log$match_obj, binary = "std", continuous = "std", 
+                        abs = TRUE, thresholds = c(m = .1), title = paste("SMD -", s, "(Logit)")) + 
+              theme_minimal(base_family = "NHG")
+  
+  print(p_pca_l)
+  cat("\n\n")
+  print(p_love_l)
+  cat("\n\n")
+  
+  t_log <- gerar_plots_tendencia(
+    strata_data = experiments[[s]]$log$matched_data, 
+    strata_name = s, 
+    full_data = experiments$Full$log$matched_data, 
+    font_family = "NHG"
+  )
+  
+  print(t_log$ext)
+  cat("\n\n")
+  print(t_log$int)
+  cat("\n\n")
+  
+  p_ps <- gerar_ps_overlap(experiments[[s]]$log$match_obj, s, font_family = "NHG")
+  print(p_ps)
+  cat("\n\n")
+}
+
+cat(":::\n\n")
+
 
 ```
 
 ```{r}
-#| layout-ncol: 2
+#| label: compare-coefficients
+#| fig-width: 10
+#| fig-height: 8
 
-t_s1_m <- gerar_plots_tendencia(experiments$S1_Male$matched_data, "S1_Male", font_family = "NHG")
-t_s1_m$ext
-t_s1_m$int
+library(ggplot2)
+library(dplyr)
+
+# Calculate 95% (1.96) and 90% (1.645) Confidence Intervals
+coef_data <- master_table %>%
+  filter(Year == 2023) %>% # Keep only the final treatment year evaluation
+  mutate(
+    # Extensive Margin CIs
+    Ext_CI_95_Low = DiD_Ext_Estimate - (1.96 * DiD_Ext_SE),
+    Ext_CI_95_High = DiD_Ext_Estimate + (1.96 * DiD_Ext_SE),
+    Ext_CI_90_Low = DiD_Ext_Estimate - (1.645 * DiD_Ext_SE),
+    Ext_CI_90_High = DiD_Ext_Estimate + (1.645 * DiD_Ext_SE),
+    
+    # Intensive Margin CIs
+    Int_CI_95_Low = DiD_Int_Estimate - (1.96 * DiD_Int_SE),
+    Int_CI_95_High = DiD_Int_Estimate + (1.96 * DiD_Int_SE),
+    Int_CI_90_Low = DiD_Int_Estimate - (1.645 * DiD_Int_SE),
+    Int_CI_90_High = DiD_Int_Estimate + (1.645 * DiD_Int_SE),
+    
+    Strata = factor(Strata, levels = rev(unique(Strata))) # Reverse for top-to-bottom plotting
+  )
+
+# 1. Plot Extensive Margin Comparison
+p_coef_ext <- ggplot(coef_data, aes(y = Strata, color = Match_Type)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 1) +
+  # 95% CI (Thinner, transparent)
+  geom_linerange(aes(xmin = Ext_CI_95_Low, xmax = Ext_CI_95_High), 
+                 position = position_dodge(width = 0.6), linewidth = 0.5, alpha = 0.6) +
+  # 90% CI (Thicker, solid)
+  geom_linerange(aes(xmin = Ext_CI_90_Low, xmax = Ext_CI_90_High), 
+                 position = position_dodge(width = 0.6), linewidth = 1.2) +
+  # Point estimate
+  geom_point(aes(x = DiD_Ext_Estimate), 
+             position = position_dodge(width = 0.6), size = 2.5) +
+  scale_color_manual(values = c("Mahalanobis" = "#058ed9", "Logit" = "#E69F00")) +
+  labs(title = "DiD Coefficient Comparison: Extensive Margin",
+       subtitle = "Thick lines denote 90% CI; Thin lines denote 95% CI",
+       x = "Treatment Effect Estimate (Probability of making a trip)",
+       y = NULL,
+       color = "Matching Method") +
+  theme_minimal(base_family = "NHG") +
+  theme(legend.position = "bottom", 
+        plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(color = "gray30", size = 10))
+
+# 2. Plot Intensive Margin Comparison
+p_coef_int <- ggplot(coef_data, aes(y = Strata, color = Match_Type)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 1) +
+  # 95% CI (Thinner, transparent)
+  geom_linerange(aes(xmin = Int_CI_95_Low, xmax = Int_CI_95_High), 
+                 position = position_dodge(width = 0.6), linewidth = 0.5, alpha = 0.6) +
+  # 90% CI (Thicker, solid)
+  geom_linerange(aes(xmin = Int_CI_90_Low, xmax = Int_CI_90_High), 
+                 position = position_dodge(width = 0.6), linewidth = 1.2) +
+  # Point estimate
+  geom_point(aes(x = DiD_Int_Estimate), 
+             position = position_dodge(width = 0.6), size = 2.5) +
+  scale_color_manual(values = c("Mahalanobis" = "#058ed9", "Logit" = "#E69F00")) +
+  labs(title = "DiD Coefficient Comparison: Intensive Margin",
+       subtitle = "Thick lines denote 90% CI; Thin lines denote 95% CI",
+       x = "Treatment Effect Estimate (Number of Trips)",
+       y = NULL,
+       color = "Matching Method") +
+  theme_minimal(base_family = "NHG") +
+  theme(legend.position = "bottom", 
+        plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(color = "gray30", size = 10))
+
+print(p_coef_ext)
+print(p_coef_int)
 
 ```
 
-## S1: Women (< 0.77 SM)
 
 ```{r}
-#| layout-ncol: 2
+#| label: calculate-balance-metrics
 
-gerar_pca(experiments$S1_Female$matched_data, "S1 Female", font_family = "NHG")
-love.plot(experiments$S1_Female$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S1 Female") + 
-  theme_minimal(base_family = "NHG")
+# Extract balance summary for a specific stratum to compare numerically
+# Example: S1_All
+bal_mah <- bal.tab(experiments$S1_All$mah$match_obj, un = FALSE)$Balance
+bal_log <- bal.tab(experiments$S1_All$log$match_obj, un = FALSE)$Balance
+
+mean_smd_mah <- mean(abs(bal_mah$Diff.Adj), na.rm = TRUE)
+mean_smd_log <- mean(abs(bal_log$Diff.Adj), na.rm = TRUE)
+
+cat("Mean Absolute SMD (S1_All)\n")
+cat("Mahalanobis:", round(mean_smd_mah, 4), "\n")
+cat("Logit:      ", round(mean_smd_log, 4), "\n")
+
 
 ```
-
-```{r}
-#| layout-ncol: 2
-
-t_s1_f <- gerar_plots_tendencia(experiments$S1_Female$matched_data, "S1_Female", font_family = "NHG")
-t_s1_f$ext
-t_s1_f$int
-
-```
-
-## S2: Men (0.77-2.01 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S2_Male$matched_data, "S2 Male", font_family = "NHG")
-love.plot(experiments$S2_Male$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S2 Male") + 
-  theme_minimal(base_family = "NHG")
-
-```
-
-```{r}
-#| layout-ncol: 2
-
-t_s2_m <- gerar_plots_tendencia(experiments$S2_Male$matched_data, "S2_Male", font_family = "NHG")
-t_s2_m$ext
-t_s2_m$int
-
-```
-
-## S2: Women (0.77-2.01 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S2_Female$matched_data, "S2 Female", font_family = "NHG")
-love.plot(experiments$S2_Female$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S2 Female") + 
-  theme_minimal(base_family = "NHG")
-
-```
-
-```{r}
-#| layout-ncol: 2
-
-t_s2_f <- gerar_plots_tendencia(experiments$S2_Female$matched_data, "S2_Female", font_family = "NHG")
-t_s2_f$ext
-t_s2_f$int
-
-```
-
-## S3: Men (> 2.01 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S3_Male$matched_data, "S3 Male", font_family = "NHG")
-love.plot(experiments$S3_Male$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S3 Male") + 
-  theme_minimal(base_family = "NHG")
-
-```
-
-```{r}
-#| layout-ncol: 2
-
-t_s3_m <- gerar_plots_tendencia(experiments$S3_Male$matched_data, "S3_Male", font_family = "NHG")
-t_s3_m$ext
-t_s3_m$int
-
-```
-
-## S3: Women (> 2.01 SM)
-
-```{r}
-#| layout-ncol: 2
-
-gerar_pca(experiments$S3_Female$matched_data, "S3 Female", font_family = "NHG")
-love.plot(experiments$S3_Female$match_obj, binary = "std", continuous = "std", 
-          abs = TRUE, thresholds = c(m = .1), title = "SMD - S3 Female") + 
-  theme_minimal(base_family = "NHG")
-
-```
-
-```{r}
-#| layout-ncol: 2
-
-t_s3_f <- gerar_plots_tendencia(experiments$S3_Female$matched_data, "S3_Female", font_family = "NHG")
-t_s3_f$ext
-t_s3_f$int
-
-```
-
-:::
-
-
 
 ```{r}
 
@@ -285,48 +341,57 @@ t_s3_f$int
 #| message: false
 #| warning: false
 
-# 1. Define the new strata keys
-strata_keys <- c("S1_Male", "S1_Female", "S2_Male", "S2_Female", "S3_Male", "S3_Female")
+# 1. Define all strata keys (Full + 9 splits)
+strata_keys <- c("Full", "S1_All", "S1_Male", "S1_Female", 
+                 "S2_All", "S2_Male", "S2_Female", 
+                 "S3_All", "S3_Male", "S3_Female")
 
-# 2. Loop through and export all plots as vector SVG
+# 2. Loop through and export all plots
 for (s in strata_keys) {
   
-  p_pca <- gerar_pca(
-    matched_data = experiments[[s]]$matched_data, 
-    strata_name = s,
-    font_family = "NHG"
-  )
-  ggsave(here("outputs", "figures", paste0("pca_overlap_", s, ".png")), 
-         plot = p_pca, device = "png", width = 8, height = 6, bg = "white")
+  # A. Export Mahalanobis and Logit outputs
+  for (method in c("mah", "log")) {
+    method_label <- toupper(method)
+    
+    # PCA
+    p_pca <- gerar_pca(experiments[[s]][[method]]$matched_data, 
+                       paste(s, method_label), font_family = "NHG")
+    ggsave(here("outputs", "figures", paste0("pca_overlap_", s, "_", method, ".png")), 
+           plot = p_pca, device = "png", width = 8, height = 6, bg = "white")
+    
+    # Love Plot
+    p_love <- love.plot(experiments[[s]][[method]]$match_obj, binary = "std", continuous = "std", 
+                        abs = TRUE, thresholds = c(m = .1), 
+                        title = paste("Balanço SMD -", s, method_label)) + 
+      theme_minimal(base_family = "NHG") +
+      theme(plot.title = element_text(face = "bold"))
+    
+    ggsave(here("outputs", "figures", paste0("love_plot_", s, "_", method, ".png")), 
+           plot = p_love, device = "png", width = 8, height = 6, bg = "white")
+    
+    # Trends (Extensive & Intensive) - FIX: Added full_data parameter here
+    p_trends <- gerar_plots_tendencia(
+      strata_data = experiments[[s]][[method]]$matched_data, 
+      strata_name = s, 
+      full_data = experiments$Full[[method]]$matched_data,
+      font_family = "NHG"
+    )
+    
+    ggsave(here("outputs", "figures", paste0("trend_extensive_", s, "_", method, ".png")), 
+           plot = p_trends$ext, device = "png", width = 8, height = 5, bg = "white")
+    
+    ggsave(here("outputs", "figures", paste0("trend_intensive_", s, "_", method, ".png")), 
+           plot = p_trends$int, device = "png", width = 8, height = 5, bg = "white")
+  }
   
-  p_love <- love.plot(experiments[[s]]$match_obj, binary = "std", continuous = "std", 
-                      abs = TRUE, thresholds = c(m = .1), 
-                      title = paste("Balanço SMD -", s)) + 
-    theme_minimal(base_family = "NHG") +
-    theme(plot.title = element_text(face = "bold"))
-  
-  ggsave(here("outputs", "figures", paste0("love_plot_", s, ".png")), 
-         plot = p_love, device = "png", width = 8, height = 6, bg = "white")
-  
-  p_trends <- gerar_plots_tendencia(
-    strata_data = experiments[[s]]$matched_data, 
-    strata_name = s,
-    font_family = "NHG"
-  )
-  
-  ggsave(here("outputs", "figures", paste0("trend_extensive_", s, ".png")), 
-         plot = p_trends$ext, device = "png", width = 8, height = 5, bg = "white")
-  
-  ggsave(here("outputs", "figures", paste0("trend_intensive_", s, ".png")), 
-         plot = p_trends$int, device = "png", width = 8, height = 5, bg = "white")
+  # B. Export P-Score Overlap (Only applies to Logit)
+  p_ps <- gerar_ps_overlap(experiments[[s]]$log$match_obj, s, font_family = "NHG")
+  ggsave(here("outputs", "figures", paste0("pscore_overlap_", s, ".png")), 
+         plot = p_ps, device = "png", width = 8, height = 6, bg = "white")
 }
 
-# 4. Export the Master Table
-write_csv(master_table, here("outputs", "tables", "master_sample_table-6s.csv"))
-
-message("(EN) All Vector Plots (.png) and Data were exported to 'outputs/' folder!")
+write_csv(master_table, here("outputs", "tables", "master_sample_table-9s.csv"))
+message("(EN) All Vector Plots (.png) for Mahalanobis and Logit methods were exported to 'outputs/'!")
 
 
 ```
-
-

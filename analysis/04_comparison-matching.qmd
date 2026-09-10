@@ -1,0 +1,201 @@
+---
+title: "04_comparison-matching"
+editor: visual
+---
+
+```{r}
+#| title: Setup & Library Load
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+```
+
+```{r}
+#| title: Data Import & Merging
+
+# Load datasets
+path_3 <- "C:/Users/pedro/Documents/2026/Mestrado/jade-line-bkps/jade-line-impact/data/processed/02_master_sample_table-9s.rds"
+path_1 <- "D:/jade-line-impact/jade-line-impact/data/processed/02_master_sample_table-9s.rds"
+
+match3 <- readRDS(path_3)
+match1 <- readRDS(path_1)
+
+# Define columns to merge on and core metrics to analyze
+join_keys <- c("Strata", "Match_Type", "Year")
+metrics <- c("DiD_Ext_Estimate", "DiD_Ext_PValue", "DiD_Int_Estimate", "DiD_Int_PValue")
+
+# Join into a single master frame and isolate the post-treatment period
+master_comp_post <- match3 %>%
+  select(all_of(c(join_keys, metrics))) %>%
+  inner_join(
+    match1 %>% select(all_of(c(join_keys, metrics))),
+    by = join_keys,
+    suffix = c("_3", "_1")
+  ) %>%
+  filter(Year == 2023) # Filters out pre-treatment years (1997, 2007, 2017)
+
+```
+
+```{r}
+#| title: Reshaping for Analysis
+
+# Define alpha for significance
+alpha_level <- 0.10
+
+# A. Ratio Comparison Data (Flagging 1:1 vs 1:3 significance)
+ratio_data <- master_comp_post %>%
+  mutate(
+    Abs_Diff_Ext = DiD_Ext_Estimate_3 - DiD_Ext_Estimate_1,
+    Pct_Diff_Ext = (Abs_Diff_Ext / DiD_Ext_Estimate_1) * 100,
+    
+    # Create categorical significance flag
+    Sig_1 = DiD_Ext_PValue_1 < alpha_level,
+    Sig_3 = DiD_Ext_PValue_3 < alpha_level,
+    Significance = case_when(
+      Sig_1 & Sig_3   ~ "Significant in Both",
+      !Sig_1 & !Sig_3 ~ "Not Significant",
+      Sig_1 & !Sig_3  ~ "Significant only in 1:1",
+      !Sig_1 & Sig_3  ~ "Significant only in 1:3"
+    ),
+    # Lock the factor levels for consistent legend ordering
+    Significance = factor(Significance, levels = c("Significant in Both", "Significant only in 1:3", "Significant only in 1:1", "Not Significant"))
+  )
+
+# B. Algorithm Comparison Data (Flagging Logit vs Mahalanobis significance)
+algo_data <- master_comp_post %>%
+  select(Strata, Year, Match_Type, 
+         DiD_Ext_Estimate_1, DiD_Ext_Estimate_3,
+         DiD_Ext_PValue_1, DiD_Ext_PValue_3) %>%
+  # Rename to simplify the simultaneous pivot of estimates and p-values
+  rename(
+    Estimate_1 = DiD_Ext_Estimate_1, Estimate_3 = DiD_Ext_Estimate_3,
+    PValue_1 = DiD_Ext_PValue_1, PValue_3 = DiD_Ext_PValue_3
+  ) %>%
+  pivot_longer(
+    cols = c(Estimate_1, Estimate_3, PValue_1, PValue_3),
+    names_to = c(".value", "Ratio"),
+    names_sep = "_"
+  ) %>%
+  mutate(Ratio = ifelse(Ratio == "1", "1:1 Ratio", "1:3 Ratio")) %>%
+  pivot_wider(
+    names_from = Match_Type,
+    values_from = c(Estimate, PValue)
+  ) %>%
+  mutate(
+    Abs_Diff_Algo = Estimate_Mahalanobis - Estimate_Logit,
+    
+    # Create categorical significance flag for algorithms
+    Sig_Logit = PValue_Logit < alpha_level,
+    Sig_Mahal = PValue_Mahalanobis < alpha_level,
+    Significance = case_when(
+      Sig_Logit & Sig_Mahal   ~ "Significant in Both",
+      !Sig_Logit & !Sig_Mahal ~ "Not Significant",
+      Sig_Logit & !Sig_Mahal  ~ "Significant only in Logit",
+      !Sig_Logit & Sig_Mahal  ~ "Significant only in Mahalanobis"
+    ),
+    Significance = factor(Significance, levels = c("Significant in Both", "Significant only in Mahalanobis", "Significant only in Logit", "Not Significant"))
+  )
+
+
+```
+
+
+```{r}
+#| title: Numerical Diagnostics (RMSE & Divergence Summaries)
+#| eval: false
+
+# Quantify how much 1:3 drifts from 1:1, separated by matching algorithm
+ratio_summary <- ratio_data %>%
+  group_by(Match_Type) %>%
+  summarise(
+    Mean_Estimate_1 = mean(DiD_Ext_Estimate_1, na.rm = TRUE),
+    Mean_Estimate_3 = mean(DiD_Ext_Estimate_3, na.rm = TRUE),
+    RMSE_Ratio      = sqrt(mean(Abs_Diff_Ext^2, na.rm = TRUE)),
+    Max_Abs_Drift   = max(abs(Abs_Diff_Ext), na.rm = TRUE)
+  )
+
+# Quantify how much Mahalanobis drifts from Logit, separated by Ratio
+algo_summary <- algo_data %>%
+  group_by(Ratio) %>%
+  summarise(
+    Mean_Logit       = mean(Logit, na.rm = TRUE),
+    Mean_Mahalanobis = mean(Mahalanobis, na.rm = TRUE),
+    RMSE_Algo        = sqrt(mean(Abs_Diff_Algo^2, na.rm = TRUE)),
+    Max_Abs_Drift    = max(abs(Abs_Diff_Algo), na.rm = TRUE)
+  )
+
+print("--- Stability Across Ratios (1:1 vs 1:3) ---")
+print(ratio_summary)
+print("--- Stability Across Algorithms (Logit vs Mahalanobis) ---")
+print(algo_summary)
+
+```
+
+```{r}
+#| title: Visualizations
+
+# Define a custom color palette for significance states
+sig_colors <- c(
+  "Significant in Both" = "#27ae60",       # Green
+  "Significant only in 1:3" = "#d35400",   # Orange
+  "Significant only in 1:1" = "#f39c12",   # Yellow
+  "Significant only in Mahalanobis" = "#9b59b6", # Purple
+  "Significant only in Logit" = "#e74c3c",       # Red
+  "Not Significant" = "#bdc3c7"            # Gray
+)
+
+# Base theme
+theme_jade <- theme_light() +
+  theme(
+    strip.text = element_text(size = 11, face = "bold", color = "white"),
+    strip.background = element_rect(fill = "#2c3e50"),
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold")
+  )
+
+# Plot A: Ratio Stability (Faceted by Algorithm, Colored by Significance)
+p_ratio <- ggplot(ratio_data, aes(x = DiD_Ext_Estimate_1, y = DiD_Ext_Estimate_3, 
+                                  color = Significance, shape = Significance)) +
+  geom_point(alpha = 0.8, size = 3) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "#2c3e50", linewidth = 0.8) +
+  scale_color_manual(values = sig_colors) +
+  # Use solid circles for both/neither, triangles/squares for mixed results
+  scale_shape_manual(values = c(16, 17, 15, 1)) + 
+  facet_wrap(~Match_Type) +
+  labs(
+    title = "Estimate Stability (2023): 1:1 vs 1:3 Matching Ratio",
+    subtitle = "Dashed line denotes perfect agreement. Colors map to p < 0.10",
+    x = "External DiD Estimate (1:1)",
+    y = "External DiD Estimate (1:3)",
+    color = "Significance (p < 0.05)",
+    shape = "Significance (p < 0.05)"
+  ) +
+  theme_jade
+
+# Plot B: Algorithm Stability (Faceted by Ratio, Colored by Significance)
+p_algo <- ggplot(algo_data, aes(x = Estimate_Logit, y = Estimate_Mahalanobis, 
+                                color = Significance, shape = Significance)) +
+  geom_point(alpha = 0.8, size = 3) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "#2c3e50", linewidth = 0.8) +
+  scale_color_manual(values = sig_colors) +
+  scale_shape_manual(values = c(16, 17, 15, 1)) +
+  facet_wrap(~Ratio) +
+  labs(
+    title = "Algorithm Consistency (2023): Logit vs Mahalanobis",
+    subtitle = "Dashed line denotes perfect agreement. Colors map to p < 0.10",
+    x = "External DiD Estimate (Logit)",
+    y = "External DiD Estimate (Mahalanobis)",
+    color = "Significance (p < 0.05)",
+    shape = "Significance (p < 0.05)"
+  ) +
+  theme_jade
+
+# Render plots
+print(p_ratio)
+print(p_algo)
+
+```
+
