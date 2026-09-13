@@ -34,6 +34,7 @@ library(ggplot2)
 library(here)
 library(rbounds)
 library(DescTools)
+library(dplyr)
 
 experiments <- readRDS(here("data", "processed", "02_experiments_results-9s.rds"))
 master_table <- readRDS(here("data", "processed", "02_master_sample_table-9s.rds"))
@@ -59,8 +60,8 @@ gerar_dist_overlap <- function(match_obj, var_name, strata_name, method_label, f
                        paste("Covariate Overlap (", var_name, ") -", strata_name, "(", method_label, ")"))
   
   bal.plot(match_obj, var.name = var_name, which = "both", type = "density", mirror = FALSE) +
-    scale_fill_manual(values = c("0" = scales::alpha("#483d3f", 0.6), "1" = scales::alpha("#058ed9", 0.6))) +
-    scale_color_manual(values = c("0" = "#483d3f", "1" = "#058ed9")) +
+    scale_fill_manual(values = c("0" = scales::alpha("#483d3f", 0.6), "1" = scales::alpha("#05cf99", 0.6))) +
+    scale_color_manual(values = c("0" = "#483d3f", "1" = "#05cf99")) +
     labs(title = plot_title) +
     theme_minimal(base_family = font_family) +
     theme(
@@ -137,8 +138,8 @@ run_rosenbaum_bounds <- function(matched_data, outcome_var = "TOT_VIAG") {
 # 4. Parallel Trends
 gerar_plots_tendencia <- function(strata_data, strata_name, full_data,
                                   font_family = "sans",
-                                  color_ctrl_full = "#a39a92", color_trt_full = "#058ed9",
-                                  color_ctrl_strata = "#483d3f", color_trt_strata = "#058ed9",
+                                  color_ctrl_full = "#a39a92", color_trt_full = "#05cf99",
+                                  color_ctrl_strata = "#483d3f", color_trt_strata = "#05cf99",
                                   linetype_full = "dashed", linetype_strata = "solid", 
                                   y_breaks_ext = waiver(), y_breaks_int = waiver(),
                                   x_breaks = c(1997, 2007, 2017, 2023)) {
@@ -272,15 +273,36 @@ cat(":::\n\n") # End main strata tabset
 ```
 
 ```{r}
-#| label: compare-coefficients
+#| label: compare-coefficients-vertical
 #| fig-width: 10
 #| fig-height: 8
 
-library(ggplot2)
-library(dplyr)
+
+# ---------------------------------------------------------
+# 1. Define Aesthetics Per Match_Type (Edit these!)
+# ---------------------------------------------------------
+match_colors <- c("CEM" = "#05cf99", 
+                  "Mahalanobis (1:1)" = "#054dff", "Mahalanobis (1:3)" = "#058ed9", 
+                  "Logit (1:1)" = "#EC6F00", "Logit (1:3)" = "#E69F00")
+
+# Alpha for the connecting lines (0 = invisible, 1 = solid)
+match_alphas <- c("CEM" = 1, 
+                  "Mahalanobis (1:1)" = 0.4, "Mahalanobis (1:3)" = 0.4, 
+                  "Logit (1:1)" = 0.4, "Logit (1:3)" = 0.4)
+
+# Width for the connecting lines
+match_widths <- c("CEM" = 0.4, 
+                  "Mahalanobis (1:1)" = 0.25, "Mahalanobis (1:3)" = 0.25, 
+                  "Logit (1:1)" = 0.25, "Logit (1:3)" = 0.25)
+
+# Sizes for Point Estimates
+match_alphas <- c("CEM" = 1, 
+                  "Mahalanobis (1:1)" = .6, "Mahalanobis (1:3)" = .6, 
+                  "Logit (1:1)" = .6, "Logit (1:3)" = .6)
+# ---------------------------------------------------------
 
 # Calculate 95% (1.96) and 90% (1.645) Confidence Intervals
-coef_data <- master_table %>%
+coef_data_flipped <- master_table %>%
   filter(Year == 2023) %>% # Keep only the final treatment year evaluation
   mutate(
     # Extensive Margin CIs
@@ -295,70 +317,88 @@ coef_data <- master_table %>%
     Int_CI_90_Low = DiD_Int_Estimate - (1.645 * DiD_Int_SE),
     Int_CI_90_High = DiD_Int_Estimate + (1.645 * DiD_Int_SE),
     
-    Strata = factor(Strata, levels = rev(unique(Strata))) # Reverse for top-to-bottom plotting
+    # Standard order for left-to-right plotting
+    Strata = factor(Strata, levels = unique(Strata)) 
   )
 
-# 1. Plot Extensive Margin Comparison
-p_coef_ext <- ggplot(coef_data, aes(y = Strata, color = Match_Type)) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 1) + 
-  scale_color_manual(values = c("CEM" = "#05cf99", 
-                                "Mahalanobis (1:1)" = "#056dff", "Mahalanobis (1:3)" = "#058ed9", 
-                                "Logit (1:1)" = "#EC6F00", "Logit (1:3)" = "#E69F00")) +
+# 1. Plot Extensive Margin Comparison (Vertical)
+p_coef_ext_flip <- ggplot(coef_data_flipped, aes(x = Strata, y = DiD_Ext_Estimate, color = Match_Type, group = Match_Type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40", linewidth = 0.5) + 
+  
+  # Connecting line between means across strata (Aesthetics mapped to Match_Type)
+  geom_line(aes(alpha = Match_Type, linewidth = Match_Type), 
+            position = position_dodge(width = 0.6)) +
+            
   # 95% CI (Thinner, transparent)
-  geom_linerange(aes(xmin = Ext_CI_95_Low, xmax = Ext_CI_95_High), 
-                 position = position_dodge(width = 0.6), linewidth = 0.5, alpha = 0.6) +
+  geom_linerange(aes(ymin = Ext_CI_95_Low, ymax = Ext_CI_95_High), 
+                 position = position_dodge(width = 0.6), linewidth = 0.15, alpha = 0.3) +
   # 90% CI (Thicker, solid)
-  geom_linerange(aes(xmin = Ext_CI_90_Low, xmax = Ext_CI_90_High), 
-                 position = position_dodge(width = 0.6), linewidth = 1.2) +
+  geom_linerange(aes(ymin = Ext_CI_90_Low, ymax = Ext_CI_90_High), 
+                 position = position_dodge(width = 0.6), linewidth = 0.5, alpha = 0.5) +
   # Point estimate
-  geom_point(aes(x = DiD_Ext_Estimate), 
-             position = position_dodge(width = 0.6), size = 2.5) +
-  scale_color_manual(values = c("CEM" = "#05cf99",
-                                "Mahalanobis (1:1)" = "#056dff", "Mahalanobis (1:3)" = "#058ed9", 
-                                "Logit (1:1)" = "#EC6F00", "Logit (1:3)" = "#E69F00")) +
+  geom_point(position = position_dodge(width = 0.6), size = 1.5) +
+             
+  # Apply the custom scales
+  scale_color_manual(values = match_colors) +
+  scale_alpha_manual(values = match_alphas, guide = "none") +
+  scale_linewidth_manual(values = match_widths, guide = "none") +
+  
   labs(title = "DiD Coefficient Comparison: Extensive Margin",
        subtitle = "Thick lines denote 90% CI; Thin lines denote 95% CI",
-       x = "Treatment Effect Estimate (Probability of making a trip)",
-       y = NULL,
+       y = "Treatment Effect Estimate (Probability of making a trip)",
+       x = NULL,
        color = "Matching Method") +
   theme_minimal(base_family = "sans") +
-  theme(legend.position = "bottom", 
-        plot.title = element_text(face = "bold", size = 14),
-        plot.subtitle = element_text(color = "gray30", size = 10))
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 12),
+        plot.title = element_text(face = "bold", size = 24),
+        plot.subtitle = element_text(color = "gray30", size = 12),
+        panel.grid.major = element_line(color = "gray70", linewidth = 0.22),
+        axis.text = element_text(size = 14))
 
-# 2. Plot Intensive Margin Comparison
-p_coef_int <- ggplot(coef_data, aes(y = Strata, color = Match_Type)) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 1) +
+# 2. Plot Intensive Margin Comparison (Vertical)
+p_coef_int_flip <- ggplot(coef_data_flipped, aes(x = Strata, y = DiD_Int_Estimate, color = Match_Type, group = Match_Type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40", linewidth = 0.5) +
+  
+  # Connecting line between means across strata (Aesthetics mapped to Match_Type)
+  geom_line(aes(alpha = Match_Type, linewidth = Match_Type), 
+            position = position_dodge(width = 0.6)) +
+            
   # 95% CI (Thinner, transparent)
-  geom_linerange(aes(xmin = Int_CI_95_Low, xmax = Int_CI_95_High), 
-                 position = position_dodge(width = 0.6), linewidth = 0.5, alpha = 0.6) +
+  geom_linerange(aes(ymin = Int_CI_95_Low, ymax = Int_CI_95_High), 
+                 position = position_dodge(width = 0.6), linewidth = 0.15, alpha = 0.3) +
   # 90% CI (Thicker, solid)
-  geom_linerange(aes(xmin = Int_CI_90_Low, xmax = Int_CI_90_High), 
-                 position = position_dodge(width = 0.6), linewidth = 1.2) +
+  geom_linerange(aes(ymin = Int_CI_90_Low, ymax = Int_CI_90_High), 
+                 position = position_dodge(width = 0.6), linewidth = 0.5, alpha = 0.5) +
   # Point estimate
-  geom_point(aes(x = DiD_Int_Estimate), 
-             position = position_dodge(width = 0.6), size = 2.5) +
-  scale_color_manual(values = c("CEM" = "#05cf99",
-                                "Mahalanobis (1:1)" = "#056dff", "Mahalanobis (1:3)" = "#058ed9", 
-                                "Logit (1:1)" = "#EC6F00", "Logit (1:3)" = "#E69F00")) +
+  geom_point(aes(alpha = Match_Type), position = position_dodge(width = 0.6), size = 1) +
+             
+  # Apply the custom scales
+  scale_color_manual(values = match_colors) +
+  scale_alpha_manual(values = match_alphas, guide = "none") +
+  scale_linewidth_manual(values = match_widths, guide = "none") +
+  
   labs(title = "DiD Coefficient Comparison: Intensive Margin",
        subtitle = "Thick lines denote 90% CI; Thin lines denote 95% CI",
-       x = "Treatment Effect Estimate (Number of Trips)",
-       y = NULL,
+       y = "Treatment Effect Estimate",
+       x = NULL,
        color = "Matching Method") +
   theme_minimal(base_family = "sans") +
-  theme(legend.position = "bottom", 
-        plot.title = element_text(face = "bold", size = 14),
-        plot.subtitle = element_text(color = "gray30", size = 10))
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 12),
+        plot.title = element_text(face = "bold", size = 24),
+        plot.subtitle = element_text(color = "gray30", size = 12),
+        panel.grid.major = element_line(color = "gray70", linewidth = 0.22),
+        axis.text = element_text(size = 14))
 
-print(p_coef_ext)
-print(p_coef_int)
+print(p_coef_ext_flip)
+print(p_coef_int_flip)
 
-ggsave(here("outputs", "figures", "02_coef_ext.png"), 
-       plot = p_coef_ext, device = "png", units= "mm", width = 183, height = 103, bg = "white")
+ggsave(here("outputs", "figures", "02_coef_ext_vertical.png"), 
+       plot = p_coef_ext_flip, device = "png", units= "mm", width = 183, height = 137, bg = "white")
 
-ggsave(here("outputs", "figures", "02_coef_int.png"), 
-       plot = p_coef_int, device = "png", units= "mm", width = 183, height = 103, bg = "white")
+ggsave(here("outputs", "figures", "02_coef_int_vertical.png"), 
+       plot = p_coef_int_flip, device = "png", units= "mm", width = 183, height = 137, bg = "white")
 
 ```
 
