@@ -351,6 +351,12 @@ p_coef_int <- ggplot(coef_data, aes(y = Strata, color = Match_Type)) +
 print(p_coef_ext)
 print(p_coef_int)
 
+ggsave(here("outputs", "figures", "02_coef_ext.png"), 
+       plot = p_coef_ext, device = "png", units= "mm", width = 183, height = 103, bg = "white")
+
+ggsave(here("outputs", "figures", "02_coef_int.png"), 
+       plot = p_coef_int, device = "png", units= "mm", width = 183, height = 103, bg = "white")
+
 ```
 
 
@@ -406,7 +412,7 @@ for (s in strata_keys) {
     p_dist <- gerar_dist_overlap(exp_data$match_obj, var_overlap, paste(s, conf$label), conf$label, font_family = "NHG")
     
     ggsave(here("outputs", "figures", paste0("overlap_", s, "_", conf$key, ".png")), 
-           plot = p_dist, device = "png", width = 8, height = 6, bg = "white")
+           plot = p_dist, device = "png", unit= "mm", width = 183, height = 103, bg = "white")
     
     # B. Export Love Plots
     p_love <- love.plot(exp_data$match_obj, binary = "std", continuous = "std", 
@@ -416,7 +422,7 @@ for (s in strata_keys) {
       theme(plot.title = element_text(face = "bold"))
     
     ggsave(here("outputs", "figures", paste0("love_plot_", s, "_", conf$key, ".png")), 
-           plot = p_love, device = "png", width = 8, height = 6, bg = "white")
+           plot = p_love, device = "png", unit= "mm", width = 183, height = 103, bg = "white")
     
     # C. Export Trend Plots (Extensive & Intensive)
     p_trends <- gerar_plots_tendencia(
@@ -427,10 +433,10 @@ for (s in strata_keys) {
     )
     
     ggsave(here("outputs", "figures", paste0("trend_extensive_", s, "_", conf$key, ".png")), 
-           plot = p_trends$ext, device = "png", width = 8, height = 5, bg = "white")
+           plot = p_trends$ext, device = "png", unit= "mm", width = 183, height = 103, bg = "white")
     
     ggsave(here("outputs", "figures", paste0("trend_intensive_", s, "_", conf$key, ".png")), 
-           plot = p_trends$int, device = "png", width = 8, height = 5, bg = "white")
+           plot = p_trends$int, device = "png", unit= "mm", width = 183, height = 103, bg = "white")
   }
 }
 

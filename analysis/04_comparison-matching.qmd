@@ -281,7 +281,9 @@ did_results_df <- master_table %>%
     # Post-matched total N for each specific algorithm row
     Matched_n = N_Post_Controle + N_Post_Tratado
   ) %>%
-  select(Strata, Match_Type, Matched_n,
+  select(Strata, Match_Type, 
+         N_Tratado = N_Post_Tratado, 
+         N_Controle = N_Post_Controle,
          DiD_Ext_Estimate, DiD_Ext_SE, DiD_Ext_PValue, 
          DiD_Int_Estimate, DiD_Int_SE, DiD_Int_PValue) %>%
   mutate(
@@ -326,7 +328,8 @@ did_results_table <- did_results_df %>%
   # Column Labels
   cols_label(
     Match_Type = "Matching Method",
-    Matched_n = "Matched n",
+    N_Tratado = "n (Trat)",
+    N_Controle = "n (Ctrl)",
     DiD_Ext_Estimate = "Estimate",
     DiD_Ext_SE = "SE",
     DiD_Ext_PValue = "p-value",
@@ -335,9 +338,9 @@ did_results_table <- did_results_df %>%
     DiD_Int_PValue = "p-value"
   ) %>%
   
-  # Number Formatting
+# Number Formatting
   fmt_number(
-    columns = Matched_n,
+    columns = c(N_Tratado, N_Controle),
     decimals = 0,
     use_seps = TRUE
   ) %>%
@@ -395,7 +398,7 @@ gtsave(did_results_table, filename = here("outputs", "tables", "04_did_results_t
 # Export the raw metrics as a CSV (dropping the boolean formatting flags)
 write_csv(
   did_results_df %>% select(-starts_with("max_")), 
-  here("outputs", "tables", "04_did_results_metrics.csv")
+  here("outputs", "tables", "04_did_results_metrics-sep.csv")
 )
 
 ```
