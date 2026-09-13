@@ -252,7 +252,7 @@ for (s in strata_keys) {
     # 4. Love Plot
     p_love <- love.plot(exp_data$match_obj, binary = "std", continuous = "std", 
                         abs = TRUE, thresholds = c(m = .1), title = paste("SMD -", s, conf$title)) + 
-              theme_minimal(base_family = "NHG")
+              theme_minimal(base_family = "sans")
     print(p_love)
     cat("\n\n")
     
@@ -300,7 +300,10 @@ coef_data <- master_table %>%
 
 # 1. Plot Extensive Margin Comparison
 p_coef_ext <- ggplot(coef_data, aes(y = Strata, color = Match_Type)) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 1) + 
+  scale_color_manual(values = c("CEM" = "#05cf99", 
+                                "Mahalanobis (1:1)" = "#056dff", "Mahalanobis (1:3)" = "#058ed9", 
+                                "Logit (1:1)" = "#EC6F00", "Logit (1:3)" = "#E69F00")) +
   # 95% CI (Thinner, transparent)
   geom_linerange(aes(xmin = Ext_CI_95_Low, xmax = Ext_CI_95_High), 
                  position = position_dodge(width = 0.6), linewidth = 0.5, alpha = 0.6) +
@@ -310,15 +313,15 @@ p_coef_ext <- ggplot(coef_data, aes(y = Strata, color = Match_Type)) +
   # Point estimate
   geom_point(aes(x = DiD_Ext_Estimate), 
              position = position_dodge(width = 0.6), size = 2.5) +
-  scale_color_manual(values = c("CEM" = "#05cf99", 
-                                "Mahalanobis (1:1)" = "#058ed9", "Mahalanobis (1:3)" = "#058ed9", 
-                                "Logit (1:1)" = "#E69F00", "Logit (1:3)" = "#E69F00")) +
+  scale_color_manual(values = c("CEM" = "#05cf99",
+                                "Mahalanobis (1:1)" = "#056dff", "Mahalanobis (1:3)" = "#058ed9", 
+                                "Logit (1:1)" = "#EC6F00", "Logit (1:3)" = "#E69F00")) +
   labs(title = "DiD Coefficient Comparison: Extensive Margin",
        subtitle = "Thick lines denote 90% CI; Thin lines denote 95% CI",
        x = "Treatment Effect Estimate (Probability of making a trip)",
        y = NULL,
        color = "Matching Method") +
-  theme_minimal(base_family = "NHG") +
+  theme_minimal(base_family = "sans") +
   theme(legend.position = "bottom", 
         plot.title = element_text(face = "bold", size = 14),
         plot.subtitle = element_text(color = "gray30", size = 10))
@@ -336,14 +339,14 @@ p_coef_int <- ggplot(coef_data, aes(y = Strata, color = Match_Type)) +
   geom_point(aes(x = DiD_Int_Estimate), 
              position = position_dodge(width = 0.6), size = 2.5) +
   scale_color_manual(values = c("CEM" = "#05cf99",
-                                "Mahalanobis (1:1)" = "#058ed9", "Mahalanobis (1:3)" = "#058ed9", 
-                                "Logit (1:1)" = "#E69F00", "Logit (1:3)" = "#E69F00")) +
+                                "Mahalanobis (1:1)" = "#056dff", "Mahalanobis (1:3)" = "#058ed9", 
+                                "Logit (1:1)" = "#EC6F00", "Logit (1:3)" = "#E69F00")) +
   labs(title = "DiD Coefficient Comparison: Intensive Margin",
        subtitle = "Thick lines denote 90% CI; Thin lines denote 95% CI",
        x = "Treatment Effect Estimate (Number of Trips)",
        y = NULL,
        color = "Matching Method") +
-  theme_minimal(base_family = "NHG") +
+  theme_minimal(base_family = "sans") +
   theme(legend.position = "bottom", 
         plot.title = element_text(face = "bold", size = 14),
         plot.subtitle = element_text(color = "gray30", size = 10))
@@ -429,7 +432,7 @@ for (s in strata_keys) {
       strata_data = exp_data$matched_data, 
       strata_name = s, 
       full_data = experiments$Full[[conf$key]]$matched_data,
-      font_family = "NHG"
+      font_family = "sans"
     )
     
     ggsave(here("outputs", "figures", paste0("trend_extensive_", s, "_", conf$key, ".png")), 
